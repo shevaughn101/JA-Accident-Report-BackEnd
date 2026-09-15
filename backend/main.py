@@ -112,7 +112,7 @@ def refresh_signed_urls(incident_data):
             for file_obj in incident_data[field]:
                 if 'blob_name' in file_obj:
                     
-                    file_obj['url'] = f"https://sentinel-system-nfqp.onrender.com/api/evidence/{file_obj['blob_name']}"
+                    file_obj['url'] = f"https://ja-accident-report-backend.onrender.com/api/evidence/{file_obj['blob_name']}"
 
 def extract_exif(image_bytes: bytes):
     """Extracts EXIF timestamp and GPS data from image bytes safely."""
@@ -355,7 +355,7 @@ async def upload_files(
             blob.upload_from_string(contents, content_type=file.content_type)
             
             
-            proxy_url = f"https://sentinel-system-nfqp.onrender.com/api/evidence/{unique_name}"
+            proxy_url = f"https://ja-accident-report-backend.onrender.com/api/evidence/{unique_name}"
             
             results.append({
                 "name": file.filename,
