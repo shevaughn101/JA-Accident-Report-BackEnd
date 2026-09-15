@@ -20,15 +20,15 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-# Setup Rate Limiter
+
 limiter = Limiter(key_func=get_remote_address)
 
-# Initialize FastAPI
+
 app = FastAPI(title="JA Accident Report API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Setup CORS for deployment
+
 ALLOWED_ORIGINS = os.environ.get("FRONTEND_URLS", "https://sentinel-frontend-olive.vercel.app,http://localhost:3000,http://127.0.0.1:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -38,7 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Firebase Admin SDK
+
 try:
     firebase_env_creds = os.environ.get("FIREBASE_CREDENTIALS_JSON")
     if firebase_env_creds:
@@ -59,9 +59,9 @@ except Exception as e:
     db = None
     bucket = None
 
-# -----------------
-# Authentication & RBAC Dependencies
-# -----------------
+
+
+
 def verify_firebase_token(authorization: str = Header(...)):
     """Verifies the Firebase ID token and returns the decoded token."""
     if not authorization.startswith("Bearer "):
@@ -69,10 +69,10 @@ def verify_firebase_token(authorization: str = Header(...)):
     
     token = authorization.split(" ")[1]
     try:
-        # check_revoked=True guarantees active tokens are instantly rejected if the account is disabled
+        
         decoded_token = auth.verify_id_token(token, check_revoked=True)
         
-        # Super Admin Bootstrap Logic
+        
         if decoded_token.get("email") == "contactshevaughn124@gmail.com":
             if decoded_token.get("role") != "admin":
                 auth.set_custom_user_claims(decoded_token["uid"], {"role": "admin"})
@@ -100,9 +100,9 @@ def require_officer(token: dict = Depends(verify_firebase_token)):
 def require_civilian(token: dict = Depends(verify_firebase_token)):
     return token
 
-# -----------------
-# Utility Functions
-# -----------------
+
+
+
 def refresh_signed_urls(incident_data):
     """Refreshes Signed URLs for any evidence containing a blob_name."""
     if not bucket: return
@@ -111,7 +111,7 @@ def refresh_signed_urls(incident_data):
         if field in incident_data and isinstance(incident_data[field], list):
             for file_obj in incident_data[field]:
                 if 'blob_name' in file_obj:
-                    # Route through our secure FastAPI proxy instead of relying on GCP IAM roles!
+                    
                     file_obj['url'] = f"https://sentinel-system-nfqp.onrender.com/api/evidence/{file_obj['blob_name']}"
 
 def extract_exif(image_bytes: bytes):
@@ -145,7 +145,7 @@ def verify_magic_bytes(contents: bytes, content_type: str) -> bool:
         return contents.startswith(b'\x89PNG\r\n\x1a\n')
     elif content_type == "application/pdf":
         return contents.startswith(b'%PDF-')
-    # For HEIC/HEIF or other formats, we'll bypass strict magic byte checks for now
+    
     return True
 
 def send_assignment_email(officer_email: str, incident_id: str):
@@ -178,7 +178,7 @@ def send_assignment_email(officer_email: str, incident_id: str):
         
         msg.attach(MIMEText(html, "html"))
         
-        # Connect securely to Gmail SMTP
+        
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
             server.sendmail(sender, officer_email, msg.as_string())
@@ -187,9 +187,9 @@ def send_assignment_email(officer_email: str, incident_id: str):
     except Exception as e:
         print(f"Error sending email to {officer_email}: {e}")
 
-# -----------------
-# Pydantic Models
-# -----------------
+
+
+
 class IncidentReport(BaseModel):
     type: str
     location: str
@@ -213,9 +213,9 @@ class RoleUpdate(BaseModel):
     role: str
     jurisdiction: str = "Unknown"
 
-# -----------------
-# Routes
-# -----------------
+
+
+
 
 @app.post("/api/auth/verify")
 async def verify_auth(token: dict = Depends(verify_firebase_token)):
@@ -295,7 +295,7 @@ async def get_evidence(uid: str, filename: str, user_token: dict = Depends(requi
             
         content = blob.download_as_bytes()
         
-        # Determine content type based on extension
+        
         content_type = "application/octet-stream"
         if filename.lower().endswith(".jpg") or filename.lower().endswith(".jpeg"):
             content_type = "image/jpeg"
@@ -327,34 +327,34 @@ async def upload_files(
         for file in files:
             contents = await file.read()
             
-            # Validate size (10MB)
+            
             if len(contents) > 10 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail=f"File {file.filename} exceeds 10MB limit")
                 
-            # Validate MIME
+            
             if file.content_type not in ["image/jpeg", "image/jpg", "image/png", "application/pdf", "image/heic", "image/heif"]:
                 raise HTTPException(status_code=400, detail=f"File {file.filename} has unsupported type {file.content_type}")
                 
-            # Cryptographic Magic Bytes Check
+            
             if not verify_magic_bytes(contents, file.content_type):
                 raise HTTPException(status_code=400, detail=f"File {file.filename} failed integrity check. Spoofed extension detected.")
                 
-            # Hash
+            
             sha256_hash = hashlib.sha256(contents).hexdigest()
             
-            # EXIF
+            
             exif_data = None
             if file.content_type in ["image/jpeg", "image/png"]:
                 exif_data = extract_exif(contents)
                 
-            # Upload
+            
             unique_name = f"{user_token.get('uid')}/{uuid.uuid4()}_{file.filename}"
             blob = bucket.blob(unique_name)
             
-            # Ensure correct content type is set on the blob
+            
             blob.upload_from_string(contents, content_type=file.content_type)
             
-            # Use internal proxy URL instead of GCP signed URL
+            
             proxy_url = f"https://sentinel-system-nfqp.onrender.com/api/evidence/{unique_name}"
             
             results.append({
@@ -398,7 +398,7 @@ async def get_my_incidents(user_token: dict = Depends(require_civilian)):
         raise HTTPException(status_code=503, detail="Database not configured")
         
     try:
-        # Fetch without order_by to avoid composite index requirement, then sort in memory
+        
         docs = db.collection('incidents').where(filter=FieldFilter('reported_by', '==', user_token.get('uid'))).stream()
         incidents = []
         for doc in docs:
@@ -407,7 +407,7 @@ async def get_my_incidents(user_token: dict = Depends(require_civilian)):
             refresh_signed_urls(incident_data)
             incidents.append(incident_data)
         
-        # Sort by timestamp descending
+        
         incidents.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         return {"incidents": incidents}
     except Exception as e:
@@ -423,13 +423,13 @@ async def get_incidents(user_token: dict = Depends(require_officer)):
         officer_jurisdiction = user_token.get("jurisdiction")
         officer_email = user_token.get("email")
         
-        # Fetch without order_by to avoid composite index requirement
+        
         docs = db.collection('incidents').stream()
         incidents = []
         for doc in docs:
             incident_data = doc.to_dict()
             
-            # Filter in Python: show if Admin, National, matching jurisdiction, OR assigned to this officer
+            
             is_admin_or_national = user_token.get("role") == "admin" or officer_jurisdiction == "National"
             is_matching_jur = incident_data.get("jurisdiction") == officer_jurisdiction
             is_assigned_to_me = incident_data.get("assigned_to") == officer_email
@@ -439,7 +439,7 @@ async def get_incidents(user_token: dict = Depends(require_officer)):
                 refresh_signed_urls(incident_data)
                 incidents.append(incident_data)
             
-        # Sort by timestamp descending
+        
         incidents.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         return {"incidents": incidents}
     except Exception as e:
