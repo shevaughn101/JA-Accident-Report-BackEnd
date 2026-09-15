@@ -24,7 +24,7 @@ from slowapi.errors import RateLimitExceeded
 limiter = Limiter(key_func=get_remote_address)
 
 # Initialize FastAPI
-app = FastAPI(title="Sentinel Civic Response API")
+app = FastAPI(title="JA Accident Report API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -166,7 +166,7 @@ def send_assignment_email(officer_email: str, incident_id: str):
         html = f"""
         <html>
           <body style="font-family: Arial, sans-serif; padding: 20px;">
-            <h2 style="color: #0f172a;">Sentinel Incident Management</h2>
+            <h2 style="color: #0f172a;">JA Accident Report</h2>
             <p>You have been assigned to a new incident.</p>
             <p><strong>Incident ID:</strong> {incident_id}</p>
             <p>Please log in to your Officer Dashboard to review the details and secure evidence.</p>
