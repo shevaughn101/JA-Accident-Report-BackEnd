@@ -51,9 +51,9 @@ try:
         cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "firebase-credentials.json")
         cred = credentials.Certificate(cred_path)
         
-        if not firebase_admin._apps:
-            firebase_admin.initialize_app(cred)
-        db = firestore.client()
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
+    db = firestore.client()
 except Exception as e:
     print(f"Warning: Firebase Admin SDK initialization failed. Error: {e}")
     db = None
