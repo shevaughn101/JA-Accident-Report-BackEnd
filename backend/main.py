@@ -19,6 +19,9 @@ from typing import List, Optional
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+import cloudinary
+import cloudinary.uploader
+from cloudinary.utils import cloudinary_url
 
 
 limiter = Limiter(key_func=get_remote_address)
@@ -48,16 +51,18 @@ try:
         cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "firebase-credentials.json")
         cred = credentials.Certificate(cred_path)
         
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(cred, {
-            'storageBucket': 'incidentplatform.firebasestorage.app'
-        })
-    db = firestore.client()
-    bucket = storage.bucket()
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        db = firestore.client()
+    except Exception as e:
+        print(f"Warning: Firebase Admin SDK initialization failed. Error: {e}")
+        db = None
+
+try:
+    if os.environ.get("CLOUDINARY_URL"):
+        cloudinary.config()
 except Exception as e:
-    print(f"Warning: Firebase Admin SDK initialization failed. Error: {e}")
-    db = None
-    bucket = None
+    print(f"Warning: Cloudinary initialization failed: {e}")
 
 
 
@@ -104,15 +109,22 @@ def require_civilian(token: dict = Depends(verify_firebase_token)):
 
 
 def refresh_signed_urls(incident_data):
-    """Refreshes Signed URLs for any evidence containing a blob_name."""
-    if not bucket: return
-    
+    """Refreshes Signed URLs for any evidence containing a blob_name (now Cloudinary public_id)."""
     for field in ['scenePhotos', 'statutoryDocs']:
         if field in incident_data and isinstance(incident_data[field], list):
             for file_obj in incident_data[field]:
                 if 'blob_name' in file_obj:
-                    
-                    file_obj['url'] = f"https://ja-accident-report-backend.onrender.com/api/evidence/{file_obj['blob_name']}"
+                    try:
+                        # Generate a signed URL for secure authenticated assets
+                        url, options = cloudinary_url(
+                            file_obj['blob_name'],
+                            resource_type="raw" if file_obj.get("type") == "application/pdf" else "image",
+                            type="authenticated",
+                            sign_url=True
+                        )
+                        file_obj['url'] = url
+                    except Exception as e:
+                        print(f"Failed to sign url for {file_obj['blob_name']}: {e}")
 
 def extract_exif(image_bytes: bytes):
     """Extracts EXIF timestamp and GPS data from image bytes safely."""
@@ -283,33 +295,7 @@ async def update_user_role(uid: str, update: RoleUpdate, admin_token: dict = Dep
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/api/evidence/{uid}/{filename}")
-async def get_evidence(uid: str, filename: str, user_token: dict = Depends(require_officer)):
-    """Internal proxy endpoint to fetch evidence securely, bypassing GCP IAM issues"""
-    if not bucket:
-        raise HTTPException(status_code=503, detail="Storage not configured")
-    try:
-        blob = bucket.blob(f"{uid}/{filename}")
-        if not blob.exists():
-            raise HTTPException(status_code=404, detail="Evidence not found")
-            
-        content = blob.download_as_bytes()
-        
-        
-        content_type = "application/octet-stream"
-        if filename.lower().endswith(".jpg") or filename.lower().endswith(".jpeg"):
-            content_type = "image/jpeg"
-        elif filename.lower().endswith(".png"):
-            content_type = "image/png"
-        elif filename.lower().endswith(".pdf"):
-            content_type = "application/pdf"
-            
-        return Response(content=content, media_type=content_type)
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error fetching evidence: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load evidence")
+# Removed /api/evidence endpoint since Cloudinary handles secure CDN delivery directly
 
 @app.post("/api/upload")
 @limiter.limit("10/minute")
@@ -318,49 +304,53 @@ async def upload_files(
     files: List[UploadFile] = File(...), 
     user_token: dict = Depends(require_civilian)
 ):
-    if not bucket:
-        raise HTTPException(status_code=503, detail="Storage not configured")
-        
     results = []
     
     try:
         for file in files:
             contents = await file.read()
             
-            
             if len(contents) > 10 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail=f"File {file.filename} exceeds 10MB limit")
                 
-            
             if file.content_type not in ["image/jpeg", "image/jpg", "image/png", "application/pdf", "image/heic", "image/heif"]:
                 raise HTTPException(status_code=400, detail=f"File {file.filename} has unsupported type {file.content_type}")
                 
-            
             if not verify_magic_bytes(contents, file.content_type):
                 raise HTTPException(status_code=400, detail=f"File {file.filename} failed integrity check. Spoofed extension detected.")
                 
-            
             sha256_hash = hashlib.sha256(contents).hexdigest()
-            
             
             exif_data = None
             if file.content_type in ["image/jpeg", "image/png"]:
                 exif_data = extract_exif(contents)
                 
+            # Upload to Cloudinary securely
+            try:
+                res_type = "raw" if file.content_type == "application/pdf" else "image"
+                upload_result = cloudinary.uploader.upload(
+                    contents, 
+                    folder=f"incidents/{user_token.get('uid')}",
+                    resource_type=res_type,
+                    type="authenticated"
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {str(e)}")
+
+            public_id = upload_result.get("public_id")
             
-            unique_name = f"{user_token.get('uid')}/{uuid.uuid4()}_{file.filename}"
-            blob = bucket.blob(unique_name)
-            
-            
-            blob.upload_from_string(contents, content_type=file.content_type)
-            
-            
-            proxy_url = f"https://ja-accident-report-backend.onrender.com/api/evidence/{unique_name}"
+            # Generate temporary signed URL for immediate use
+            proxy_url, _ = cloudinary_url(
+                public_id,
+                resource_type=res_type,
+                type="authenticated",
+                sign_url=True
+            )
             
             results.append({
                 "name": file.filename,
                 "url": proxy_url,
-                "blob_name": unique_name,
+                "blob_name": public_id, # Reusing blob_name for public_id to minimize DB schema changes
                 "hash": sha256_hash,
                 "size": len(contents),
                 "type": file.content_type,
