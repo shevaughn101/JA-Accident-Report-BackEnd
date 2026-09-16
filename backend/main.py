@@ -54,9 +54,9 @@ try:
         if not firebase_admin._apps:
             firebase_admin.initialize_app(cred)
         db = firestore.client()
-    except Exception as e:
-        print(f"Warning: Firebase Admin SDK initialization failed. Error: {e}")
-        db = None
+except Exception as e:
+    print(f"Warning: Firebase Admin SDK initialization failed. Error: {e}")
+    db = None
 
 try:
     if os.environ.get("CLOUDINARY_URL"):
