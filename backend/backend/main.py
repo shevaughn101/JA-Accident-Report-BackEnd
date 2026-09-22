@@ -9,7 +9,9 @@ from io import BytesIO
 from datetime import timedelta
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+import html
+import re
+from pydantic import BaseModel, EmailStr, Field, field_validator
 import firebase_admin
 from firebase_admin import credentials, firestore, auth, storage
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -202,12 +204,31 @@ def send_assignment_email(officer_email: str, incident_id: str):
 
 
 
+def sanitize_string(v: str) -> str:
+    if not isinstance(v, str):
+        return v
+    # Reject obvious injection payloads
+    malicious_patterns = [
+        r'sleep\s*\(',
+        r'cat\s+/etc/',
+        r'\.\./\.\./',
+        r'DBMS_SESSION\.SLEEP',
+        r'java\.lang\.Thread\.sleep',
+        r'(?i)select.*?from',
+        r'(?i)union.*?select'
+    ]
+    for pattern in malicious_patterns:
+        if re.search(pattern, v, re.IGNORECASE):
+            raise ValueError("Invalid input detected")
+    # Escape HTML to prevent XSS
+    return html.escape(v)
+
 class IncidentReport(BaseModel):
-    type: str
-    location: str
-    jurisdiction: str
-    description: str
-    timestamp: str
+    type: str = Field(..., max_length=100)
+    location: str = Field(..., max_length=255)
+    jurisdiction: str = Field(..., max_length=100)
+    description: str = Field(..., max_length=5000)
+    timestamp: str = Field(..., max_length=50)
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     vehicleDetails: dict = {}
@@ -216,14 +237,29 @@ class IncidentReport(BaseModel):
     statutoryDocs: list = []
     scenePhotos: list = []
 
+    @field_validator('type', 'location', 'jurisdiction', 'description', 'timestamp', mode='before')
+    @classmethod
+    def sanitize_strings(cls, v):
+        return sanitize_string(v)
+
 class OfficerCreate(BaseModel):
     email: EmailStr
-    password: str
-    jurisdiction: str
+    password: str = Field(..., min_length=6, max_length=128)
+    jurisdiction: str = Field(..., max_length=100)
+
+    @field_validator('jurisdiction', mode='before')
+    @classmethod
+    def sanitize_jurisdiction(cls, v):
+        return sanitize_string(v)
 
 class RoleUpdate(BaseModel):
-    role: str
-    jurisdiction: str = "Unknown"
+    role: str = Field(..., max_length=50)
+    jurisdiction: str = Field("Unknown", max_length=100)
+
+    @field_validator('role', 'jurisdiction', mode='before')
+    @classmethod
+    def sanitize_role(cls, v):
+        return sanitize_string(v)
 
 
 
