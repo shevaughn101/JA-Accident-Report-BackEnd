@@ -34,3 +34,4 @@ firebase-credentials.json
 .DS_Store
 Thumbs.db
 frontend/
+firebase-key.json
