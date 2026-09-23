@@ -211,11 +211,14 @@ def sanitize_string(v: str) -> str:
     malicious_patterns = [
         r'sleep\s*\(',
         r'cat\s+/etc/',
-        r'\.\./\.\./',
+        r'\.\./',
+        r'\.\.\\',
         r'DBMS_SESSION\.SLEEP',
         r'java\.lang\.Thread\.sleep',
         r'(?i)select.*?from',
-        r'(?i)union.*?select'
+        r'(?i)union.*?select',
+        r'http://',
+        r'https://'
     ]
     for pattern in malicious_patterns:
         if re.search(pattern, v, re.IGNORECASE):
@@ -237,7 +240,15 @@ class IncidentReport(BaseModel):
     statutoryDocs: list = []
     scenePhotos: list = []
 
-    @field_validator('type', 'location', 'jurisdiction', 'description', 'timestamp', mode='before')
+    @field_validator('timestamp', mode='before')
+    @classmethod
+    def validate_timestamp(cls, v):
+        import re
+        if not isinstance(v, str) or not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', v):
+            raise ValueError("Invalid timestamp format")
+        return v
+
+    @field_validator('type', 'location', 'jurisdiction', 'description', mode='before')
     @classmethod
     def sanitize_strings(cls, v):
         return sanitize_string(v)
