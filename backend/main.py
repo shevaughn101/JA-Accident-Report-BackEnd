@@ -7,6 +7,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from io import BytesIO
 from datetime import timedelta
+import datetime
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 import html
@@ -424,6 +425,18 @@ async def create_incident(request: Request, report: IncidentReport, user_token: 
         
         doc_ref = db.collection('incidents').document()
         doc_ref.set(report_dict)
+        
+        try:
+            db.collection('notifications').add({
+                'target_user': 'admin',
+                'message': 'A new incident report has been submitted.',
+                'incident_id': doc_ref.id,
+                'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                'read': False
+            })
+        except Exception as ne:
+            print(f"Error creating notification: {ne}")
+            
         return {"message": "Incident reported successfully", "id": doc_ref.id}
     except Exception as e:
         print(f"Error creating incident: {e}")
@@ -489,10 +502,25 @@ async def update_incident_status(incident_id: str, payload: dict, user_token: di
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
         doc_ref = db.collection('incidents').document(incident_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        incident_data = doc.to_dict()
         
         update_data = {}
         if "status" in payload:
             update_data["status"] = payload["status"]
+            if payload["status"] != incident_data.get("status"):
+                try:
+                    db.collection('notifications').add({
+                        'target_user': incident_data.get('reported_by'),
+                        'message': f'Your incident report status has been updated to: {payload["status"]}',
+                        'incident_id': incident_id,
+                        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        'read': False
+                    })
+                except Exception as ne:
+                    print(f"Error creating notification: {ne}")
         if "assigned_to" in payload:
             if user_token.get("role") != "admin":
                 raise HTTPException(status_code=403, detail="Only admins can reassign incidents")
@@ -506,4 +534,45 @@ async def update_incident_status(incident_id: str, payload: dict, user_token: di
         return {"message": "Status updated"}
     except Exception as e:
         print(f"Error updating incident status: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@app.get("/api/notifications")
+async def get_notifications(user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        uid = user_token.get('uid')
+        role = user_token.get('role', 'civilian')
+        
+        target_users = [uid]
+        if role == 'admin':
+            target_users.append('admin')
+            
+        docs = db.collection('notifications').where(filter=FieldFilter('target_user', 'in', target_users)).stream()
+        
+        notifications = []
+        for doc in docs:
+            notif_data = doc.to_dict()
+            notif_data['id'] = doc.id
+            notifications.append(notif_data)
+            
+        notifications.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+            
+        return notifications[:20]
+    except Exception as e:
+        print(f"Error fetching notifications: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@app.post("/api/notifications/read")
+async def mark_notifications_read(payload: dict, user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        notification_ids = payload.get('ids', [])
+        for nid in notification_ids:
+            doc_ref = db.collection('notifications').document(nid)
+            doc_ref.update({'read': True})
+        return {"message": "Notifications marked as read"}
+    except Exception as e:
+        print(f"Error updating notifications: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
