@@ -526,6 +526,19 @@ async def update_incident_status(incident_id: str, payload: dict, user_token: di
                 raise HTTPException(status_code=403, detail="Only admins can reassign incidents")
             update_data["assigned_to"] = payload["assigned_to"]
             
+        if "police_note" in payload:
+            update_data["police_note"] = payload["police_note"]
+            try:
+                db.collection('notifications').add({
+                    'target_user': incident_data.get('reported_by'),
+                    'message': 'An official police note was added to your incident report.',
+                    'incident_id': incident_id,
+                    'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'read': False
+                })
+            except Exception as ne:
+                print(f"Error creating notification: {ne}")
+            
         doc_ref.update(update_data)
         
         if "assigned_to" in payload and payload["assigned_to"]:
