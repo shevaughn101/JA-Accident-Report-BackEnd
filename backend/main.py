@@ -24,6 +24,39 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import cloudinary
 import cloudinary.uploader
+
+import smtplib
+from email.message import EmailMessage
+
+def send_email_notification(uid: str, subject: str, message: str):
+    try:
+        user = auth.get_user(uid)
+        to_email = user.email
+        if not to_email:
+            print("User has no email.")
+            return
+            
+        print(f"\n--- [EMAIL SYSTEM LOG] ---")
+        print(f"To: {to_email}")
+        print(f"Subject: {subject}")
+        print(f"Message: {message}")
+        print(f"--------------------------\n")
+        
+        # Real implementation using Gmail (Requires App Password)
+        SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
+        SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD")
+        if SENDER_EMAIL and SENDER_PASSWORD:
+            msg = EmailMessage()
+            msg.set_content(message)
+            msg['Subject'] = subject
+            msg['From'] = f"JA Accident Report <{SENDER_EMAIL}>"
+            msg['To'] = to_email
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+                smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
+                smtp.send_message(msg)
+    except Exception as e:
+        print(f"Error sending email to UID {uid}: {e}")
+
 from cloudinary.utils import cloudinary_url
 
 
@@ -512,19 +545,36 @@ async def update_incident_status(incident_id: str, payload: dict, user_token: di
             update_data["status"] = payload["status"]
             if payload["status"] != incident_data.get("status"):
                 try:
+                    target_uid = incident_data.get('reported_by')
+                    message = f'Your incident report status has been officially updated to: {payload["status"].upper()}.'
                     db.collection('notifications').add({
-                        'target_user': incident_data.get('reported_by'),
-                        'message': f'Your incident report status has been updated to: {payload["status"]}',
+                        'target_user': target_uid,
+                        'message': message,
                         'incident_id': incident_id,
                         'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                         'read': False
                     })
+                    # Trigger Email
+                    send_email_notification(target_uid, "Incident Status Update", message)
                 except Exception as ne:
                     print(f"Error creating notification: {ne}")
         if "assigned_to" in payload:
             if user_token.get("role") != "admin":
                 raise HTTPException(status_code=403, detail="Only admins can reassign incidents")
             update_data["assigned_to"] = payload["assigned_to"]
+            try:
+                message = f'Admin has assigned a new incident to you for investigation. ID: {incident_id}'
+                db.collection('notifications').add({
+                    'target_user': payload["assigned_to"],
+                    'message': message,
+                    'incident_id': incident_id,
+                    'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'read': False
+                })
+                # Trigger Email to Officer
+                send_email_notification(payload["assigned_to"], "New Investigation Assignment", message)
+            except Exception as e:
+                print(f"Error notifying officer: {e}")
             
         if "police_note" in payload:
             update_data["police_note"] = payload["police_note"]
