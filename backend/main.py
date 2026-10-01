@@ -639,3 +639,122 @@ async def mark_notifications_read(payload: dict, user_token: dict = Depends(veri
     except Exception as e:
         print(f"Error updating notifications: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@app.post("/api/admin/policy")
+async def create_insurance_policy(payload: dict, user_token: dict = Depends(require_admin)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        # Find user by email
+        user_email = payload.get("user_email")
+        if not user_email:
+            raise HTTPException(status_code=400, detail="User email required")
+            
+        try:
+            target_user = auth.get_user_by_email(user_email)
+            target_uid = target_user.uid
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"User with email {user_email} not found in Firebase.")
+            
+        policy_data = {
+            "policy_number": payload.get("policy_number"),
+            "company": payload.get("company"),
+            "payment_amount": payload.get("payment_amount", 0),
+            "next_payment_date": payload.get("next_payment_date", ""),
+            "owner_uid": target_uid,
+            "created_by": user_token.get("uid"),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        
+        # Save to database
+        db.collection("insurance_policies").document(payload.get("policy_number")).set(policy_data)
+        
+        return {"status": "success", "policy": policy_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creating policy: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@app.post("/api/insurance/login")
+async def login_insurance_policy(payload: dict, user_token: dict = Depends(require_civilian)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        policy_num = payload.get("policy_number")
+        if not policy_num:
+            raise HTTPException(status_code=400, detail="Policy number required")
+            
+        doc_ref = db.collection("insurance_policies").document(policy_num)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Policy not found")
+            
+        policy_data = doc.to_dict()
+        
+        # Verify ownership
+        if policy_data.get("owner_uid") != user_token.get("uid"):
+            raise HTTPException(status_code=403, detail="You do not have access to this policy.")
+            
+        return {"status": "success", "policy": policy_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error accessing policy: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@app.post("/api/insurance/message")
+async def send_insurance_message(payload: dict, user_token: dict = Depends(require_civilian)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        policy_num = payload.get("policy_number")
+        msg_text = payload.get("message")
+        
+        if not policy_num or not msg_text:
+            raise HTTPException(status_code=400, detail="Missing data")
+            
+        doc_ref = db.collection("insurance_policies").document(policy_num)
+        doc = doc_ref.get()
+        
+        if not doc.exists or doc.to_dict().get("owner_uid") != user_token.get("uid"):
+            raise HTTPException(status_code=403, detail="Access denied")
+            
+        # Log to db
+        db.collection("insurance_messages").add({
+            "policy_number": policy_num,
+            "sender_uid": user_token.get("uid"),
+            "message": msg_text,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        })
+        
+        # Trigger email to Admin
+        admin_email = os.environ.get("SENDER_EMAIL") # Using sender email as admin inbox for demo
+        if admin_email:
+            # We use our helper function to print the mock email, but the helper requires a target UID.
+            # So we will just write custom mock logic here for the admin email.
+            print(f"\n--- [ADMIN INBOX ALERT] ---")
+            print(f"To: {admin_email}")
+            print(f"Subject: Secure Message Received - Policy {policy_num}")
+            print(f"Message: A user has sent a secure message to their insurance agent: '{msg_text}'")
+            print(f"---------------------------\n")
+            
+            SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD")
+            if SENDER_PASSWORD:
+                msg = EmailMessage()
+                msg.set_content(f"A user on Policy {policy_num} sent a message:\n\n{msg_text}")
+                msg['Subject'] = f"Secure Message - {policy_num}"
+                msg['From'] = f"JA Accident Report <{admin_email}>"
+                msg['To'] = admin_email
+                with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+                    smtp.login(admin_email, SENDER_PASSWORD)
+                    smtp.send_message(msg)
+                    
+        return {"status": "success"}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
