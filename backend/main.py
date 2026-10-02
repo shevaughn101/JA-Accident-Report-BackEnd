@@ -908,3 +908,29 @@ async def submit_insurance_claim(payload: dict, user_token: dict = Depends(verif
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/insurance/claims")
+async def get_insurance_claims(user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        role = user_token.get("role")
+        if role not in ["insurance_agent", "admin"]:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+            
+        company = user_token.get("company")
+        if not company:
+            raise HTTPException(status_code=400, detail="No company associated with agent")
+            
+        # Get all policies for this company that have started a claim (stage > 1)
+        docs = db.collection("insurance_policies").where(filter=FieldFilter("company", "==", company)).where(filter=FieldFilter("stage", ">", 1)).stream()
+        
+        claims = []
+        for doc in docs:
+            claim_data = doc.to_dict()
+            claims.append(claim_data)
+            
+        return claims
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
