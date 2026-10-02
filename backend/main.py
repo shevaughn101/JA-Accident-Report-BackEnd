@@ -893,7 +893,7 @@ async def submit_insurance_claim(payload: dict, user_token: dict = Depends(verif
             raise HTTPException(status_code=400, detail="Missing required fields")
             
         # 1. Update Policy Stage
-        db.collection("insurance_policies").document(policy_num).update({"stage": 2})
+        db.collection("insurance_policies").document(policy_num).update({"stage": 2, "incident_id": payload.get("incident_id")})
         
         # 2. Send Notification to Insurance Agent
         db.collection("notifications").add({
