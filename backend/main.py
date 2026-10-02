@@ -766,3 +766,81 @@ async def send_insurance_message(payload: dict, user_token: dict = Depends(requi
     except Exception as e:
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+class ClientRegister(BaseModel):
+    email: str
+    password: str
+    policy_number: str
+    company: str
+    payment_amount: float
+    next_payment_date: str
+
+@app.post("/api/insurance/register_client")
+async def register_insurance_client(client: ClientRegister, user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    # Must be insurance agent or admin
+    if user_token.get("role") not in ["insurance_agent", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    try:
+        # 1. Create the Firebase User
+        try:
+            target_user = auth.create_user(
+                email=client.email,
+                password=client.password
+            )
+            auth.set_custom_user_claims(target_user.uid, {"role": "civilian"})
+            db.collection('users').document(target_user.uid).set({
+                'email': client.email,
+                'role': 'civilian',
+                'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat()
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to create user account: {str(e)}")
+            
+        # 2. Issue the Policy
+        policy_data = {
+            "policy_number": client.policy_number,
+            "company": client.company,
+            "payment_amount": client.payment_amount,
+            "next_payment_date": client.next_payment_date,
+            "owner_uid": target_user.uid,
+            "created_by": user_token.get("uid"),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        db.collection("insurance_policies").document(client.policy_number).set(policy_data)
+        
+        return {"status": "success", "policy": policy_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error registering client: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@app.post("/api/insurance/policy/status")
+async def update_insurance_status(payload: dict, user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    if user_token.get("role") not in ["insurance_agent", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    try:
+        policy_num = payload.get("policy_number")
+        stage = payload.get("stage")
+        
+        if not policy_num or not stage:
+            raise HTTPException(status_code=400, detail="Missing data")
+            
+        doc_ref = db.collection("insurance_policies").document(policy_num)
+        doc = doc_ref.get()
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Policy not found")
+            
+        doc_ref.update({"stage": stage})
+        return {"status": "success"}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
