@@ -620,6 +620,10 @@ async def get_notifications(user_token: dict = Depends(verify_auth)):
         target_users = [uid]
         if role == 'admin':
             target_users.append('admin')
+        elif role == 'insurance_agent':
+            company = user_token.get('company', '')
+            if company:
+                target_users.append(f"insurance_{company}")
             
         docs = db.collection('notifications').where(filter=FieldFilter('target_user', 'in', target_users)).stream()
         
@@ -874,5 +878,33 @@ async def create_insurance_policy_agent(payload: dict, user_token: dict = Depend
         
         db.collection("insurance_policies").document(policy_num).set(policy_data)
         return {"message": f"Successfully assigned policy {policy_num} to {user_email}", "policy_number": policy_num}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/insurance/submit_claim")
+async def submit_insurance_claim(payload: dict, user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        policy_num = payload.get("policy_number")
+        company = payload.get("company")
+        if not policy_num or not company:
+            raise HTTPException(status_code=400, detail="Missing required fields")
+            
+        # 1. Update Policy Stage
+        db.collection("insurance_policies").document(policy_num).update({"stage": 2})
+        
+        # 2. Send Notification to Insurance Agent
+        db.collection("notifications").add({
+            "target_user": f"insurance_{company}",
+            "title": f"New Claim Submitted",
+            "body": f"A new claim has been submitted for policy {policy_num}.",
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "read": False,
+            "type": "claim_submission"
+        })
+        
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
