@@ -706,7 +706,7 @@ async def login_insurance_policy(payload: dict, user_token: dict = Depends(requi
         policy_data = doc.to_dict()
         
         # Verify ownership
-        if policy_data.get("owner_uid") != user_token.get("uid"):
+        if policy_data.get("user_email") != user_token.get("email"):
             raise HTTPException(status_code=403, detail="You do not have access to this policy.")
             
         return {"status": "success", "policy": policy_data}
@@ -846,3 +846,33 @@ async def update_insurance_status(payload: dict, user_token: dict = Depends(veri
     except Exception as e:
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@app.post("/api/insurance/create_policy")
+async def create_insurance_policy_agent(payload: dict, user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    if user_token.get("role") not in ["insurance_agent", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    try:
+        user_email = payload.get("user_email")
+        policy_num = payload.get("policy_number")
+        
+        if not user_email or not policy_num:
+            raise HTTPException(status_code=400, detail="User email and policy number required")
+            
+        policy_data = {
+            "user_email": user_email,
+            "policy_number": policy_num,
+            "company": payload.get("company", "Unknown"),
+            "payment_amount": payload.get("payment_amount", 0.0),
+            "next_payment_date": payload.get("next_payment_date", ""),
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "stage": 1
+        }
+        
+        db.collection("insurance_policies").document(policy_num).set(policy_data)
+        return {"message": f"Successfully assigned policy {policy_num} to {user_email}", "policy_number": policy_num}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
