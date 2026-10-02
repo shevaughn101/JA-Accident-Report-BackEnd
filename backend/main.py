@@ -934,3 +934,28 @@ async def get_insurance_claims(user_token: dict = Depends(verify_auth)):
         return claims
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/insurance/incident/{incident_id}")
+async def get_incident_for_insurance(incident_id: str, user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        role = user_token.get("role")
+        if role not in ["insurance_agent", "admin"]:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+            
+        doc_ref = db.collection("traffic_incidents").document(incident_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            # Maybe it's in approved_incidents?
+            doc_ref = db.collection("approved_incidents").document(incident_id)
+            doc = doc_ref.get()
+            if not doc.exists:
+                raise HTTPException(status_code=404, detail="Incident not found")
+            
+        return doc.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
