@@ -314,10 +314,10 @@ class RoleUpdate(BaseModel):
 
 @app.post("/api/auth/verify")
 async def verify_auth(token: dict = Depends(verify_firebase_token)):
-    return {
-        "role": token.get("role", "civilian"),
-        "jurisdiction": token.get("jurisdiction", "Unknown")
-    }
+    # Return the entire decoded token to make custom claims (uid, company, role, etc) accessible to all endpoints
+    token.setdefault("role", "civilian")
+    token.setdefault("jurisdiction", "Unknown")
+    return token
 
 @app.post("/api/admin/officers")
 async def create_officer(officer: OfficerCreate, admin_token: dict = Depends(require_admin)):
