@@ -325,8 +325,16 @@ async def create_officer(officer: OfficerCreate, admin_token: dict = Depends(req
             password=officer.password,
             email_verified=True
         )
-        auth.set_custom_user_claims(user.uid, {"role": "officer", "jurisdiction": officer.jurisdiction})
-        return {"message": "Officer created successfully", "uid": user.uid}
+        target_role = officer.role if officer.role in ["officer", "insurance_agent"] else "officer"
+        claims = {"role": target_role}
+        
+        if target_role == "officer":
+            claims["jurisdiction"] = officer.jurisdiction
+        elif target_role == "insurance_agent":
+            claims["company"] = officer.company
+            
+        auth.set_custom_user_claims(user.uid, claims)
+        return {"message": "User created successfully", "uid": user.uid}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
