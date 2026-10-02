@@ -290,7 +290,9 @@ class IncidentReport(BaseModel):
 class OfficerCreate(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6, max_length=128)
-    jurisdiction: str = Field(..., max_length=100)
+    jurisdiction: str = Field("", max_length=100)
+    role: str = "officer"
+    company: str = "" 
 
     @field_validator('jurisdiction', mode='before')
     @classmethod
