@@ -274,18 +274,6 @@ class IncidentReport(BaseModel):
     statutoryDocs: list = []
     scenePhotos: list = []
 
-    @field_validator('timestamp', mode='before')
-    @classmethod
-    def validate_timestamp(cls, v):
-        import re
-        if not isinstance(v, str) or not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', v):
-            raise ValueError("Invalid timestamp format")
-        return v
-
-    @field_validator('type', 'location', 'jurisdiction', 'description', mode='before')
-    @classmethod
-    def sanitize_strings(cls, v):
-        return sanitize_string(v)
 
 class OfficerCreate(BaseModel):
     email: EmailStr
