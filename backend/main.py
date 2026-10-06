@@ -41,8 +41,6 @@ def send_email_notification(uid: str, subject: str, message: str):
         print(f"Subject: {subject}")
         print(f"Message: {message}")
         print(f"--------------------------\n")
-        
-        # Real implementation using Gmail (Requires App Password)
         SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
         SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD")
         if SENDER_EMAIL and SENDER_PASSWORD:
@@ -151,7 +149,6 @@ def refresh_signed_urls(incident_data):
             for file_obj in incident_data[field]:
                 if 'blob_name' in file_obj:
                     try:
-                        # Generate a signed URL for secure authenticated assets
                         url, options = cloudinary_url(
                             file_obj['blob_name'],
                             resource_type="raw" if file_obj.get("type") == "application/pdf" else "image",
@@ -241,7 +238,6 @@ def send_assignment_email(officer_email: str, incident_id: str):
 def sanitize_string(v: str) -> str:
     if not isinstance(v, str):
         return v
-    # Reject obvious injection payloads
     malicious_patterns = [
         r'sleep\s*\(',
         r'cat\s+/etc/',
@@ -257,7 +253,6 @@ def sanitize_string(v: str) -> str:
     for pattern in malicious_patterns:
         if re.search(pattern, v, re.IGNORECASE):
             raise ValueError("Invalid input detected")
-    # Escape HTML to prevent XSS
     return html.escape(v)
 
 class IncidentReport(BaseModel):
@@ -314,7 +309,6 @@ class RoleUpdate(BaseModel):
 
 @app.post("/api/auth/verify")
 async def verify_auth(token: dict = Depends(verify_firebase_token)):
-    # Return the entire decoded token to make custom claims (uid, company, role, etc) accessible to all endpoints
     token.setdefault("role", "civilian")
     token.setdefault("jurisdiction", "Unknown")
     return token
@@ -386,8 +380,6 @@ async def update_user_role(uid: str, update: RoleUpdate, admin_token: dict = Dep
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# Removed /api/evidence endpoint since Cloudinary handles secure CDN delivery directly
-
 @app.post("/api/upload")
 @limiter.limit("10/minute")
 async def upload_files(
@@ -415,8 +407,6 @@ async def upload_files(
             exif_data = None
             if file.content_type in ["image/jpeg", "image/png"]:
                 exif_data = extract_exif(contents)
-                
-            # Upload to Cloudinary securely
             try:
                 res_type = "raw" if file.content_type == "application/pdf" else "image"
                 upload_result = cloudinary.uploader.upload(
@@ -429,8 +419,6 @@ async def upload_files(
                 raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {str(e)}")
 
             public_id = upload_result.get("public_id")
-            
-            # Generate temporary signed URL for immediate use
             proxy_url, _ = cloudinary_url(
                 public_id,
                 resource_type=res_type,
@@ -564,7 +552,6 @@ async def update_incident_status(incident_id: str, payload: dict, user_token: di
                         'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                         'read': False
                     })
-                    # Trigger Email
                     send_email_notification(target_uid, "Incident Status Update", message)
                 except Exception as ne:
                     print(f"Error creating notification: {ne}")
@@ -581,7 +568,6 @@ async def update_incident_status(incident_id: str, payload: dict, user_token: di
                     'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     'read': False
                 })
-                # Trigger Email to Officer
                 send_email_notification(payload["assigned_to"], "New Investigation Assignment", message)
             except Exception as e:
                 print(f"Error notifying officer: {e}")
@@ -660,7 +646,6 @@ async def create_insurance_policy(payload: dict, user_token: dict = Depends(requ
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
-        # Find user by email
         user_email = payload.get("user_email")
         if not user_email:
             raise HTTPException(status_code=400, detail="User email required")
@@ -680,8 +665,6 @@ async def create_insurance_policy(payload: dict, user_token: dict = Depends(requ
             "created_by": user_token.get("uid"),
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
-        
-        # Save to database
         db.collection("insurance_policies").document(payload.get("policy_number")).set(policy_data)
         
         return {"status": "success", "policy": policy_data}
@@ -708,8 +691,6 @@ async def login_insurance_policy(payload: dict, user_token: dict = Depends(requi
             raise HTTPException(status_code=404, detail="Policy not found")
             
         policy_data = doc.to_dict()
-        
-        # Verify ownership
         if policy_data.get("user_email") != user_token.get("email"):
             raise HTTPException(status_code=403, detail="You do not have access to this policy.")
             
@@ -737,20 +718,14 @@ async def send_insurance_message(payload: dict, user_token: dict = Depends(requi
         
         if not doc.exists or doc.to_dict().get("owner_uid") != user_token.get("uid"):
             raise HTTPException(status_code=403, detail="Access denied")
-            
-        # Log to db
         db.collection("insurance_messages").add({
             "policy_number": policy_num,
             "sender_uid": user_token.get("uid"),
             "message": msg_text,
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
         })
-        
-        # Trigger email to Admin
         admin_email = os.environ.get("SENDER_EMAIL") # Using sender email as admin inbox for demo
         if admin_email:
-            # We use our helper function to print the mock email, but the helper requires a target UID.
-            # So we will just write custom mock logic here for the admin email.
             print(f"\n--- [ADMIN INBOX ALERT] ---")
             print(f"To: {admin_email}")
             print(f"Subject: Secure Message Received - Policy {policy_num}")
@@ -786,12 +761,10 @@ class ClientRegister(BaseModel):
 async def register_insurance_client(client: ClientRegister, user_token: dict = Depends(verify_auth)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    # Must be insurance agent or admin
     if user_token.get("role") not in ["insurance_agent", "admin"]:
         raise HTTPException(status_code=403, detail="Unauthorized")
         
     try:
-        # 1. Create the Firebase User
         try:
             target_user = auth.create_user(
                 email=client.email,
@@ -805,8 +778,6 @@ async def register_insurance_client(client: ClientRegister, user_token: dict = D
             })
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to create user account: {str(e)}")
-            
-        # 2. Issue the Policy
         policy_data = {
             "policy_number": client.policy_number,
             "company": client.company,
@@ -891,11 +862,7 @@ async def submit_insurance_claim(payload: dict, user_token: dict = Depends(verif
         company = payload.get("company")
         if not policy_num or not company:
             raise HTTPException(status_code=400, detail="Missing required fields")
-            
-        # 1. Update Policy Stage
         db.collection("insurance_policies").document(policy_num).update({"stage": 2, "incident_id": payload.get("incident_id")})
-        
-        # 2. Send Notification to Insurance Agent
         db.collection("notifications").add({
             "target_user": f"insurance_{company}",
             "title": f"New Claim Submitted",
@@ -922,8 +889,6 @@ async def get_insurance_claims(user_token: dict = Depends(verify_auth)):
         company = user_token.get("company")
         if not company:
             raise HTTPException(status_code=400, detail="No company associated with agent")
-            
-        # Get all policies for this company (filter stage > 1 in memory to avoid Firestore composite index requirement)
         docs = db.collection("insurance_policies").where(filter=FieldFilter("company", "==", company)).stream()
         
         claims = []
@@ -945,8 +910,6 @@ async def get_incident_for_insurance(incident_id: str, user_token: dict = Depend
         role = user_token.get("role")
         if role not in ["insurance_agent", "admin"]:
             raise HTTPException(status_code=403, detail="Unauthorized")
-            
-        # Fetch from the actual incidents collection used everywhere
         doc_ref = db.collection("incidents").document(incident_id)
         doc = doc_ref.get()
         if not doc.exists:
