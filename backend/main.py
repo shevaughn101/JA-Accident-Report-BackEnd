@@ -1,12 +1,9 @@
 import os
 import hashlib
-import uuid
 import json
-import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from io import BytesIO
-from datetime import timedelta
 import datetime
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,7 +22,6 @@ from slowapi.errors import RateLimitExceeded
 import cloudinary
 import cloudinary.uploader
 
-import smtplib
 from email.message import EmailMessage
 
 def send_email_notification(uid: str, subject: str, message: str):
@@ -270,7 +266,6 @@ class IncidentReport(BaseModel):
     scenePhotos: list = []
 
     @field_validator('timestamp', mode='before')
-    @classmethod
     def validate_timestamp(cls, v):
         import re
         if not isinstance(v, str) or not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', v):
@@ -278,7 +273,6 @@ class IncidentReport(BaseModel):
         return v
 
     @field_validator('type', 'location', 'jurisdiction', 'description', mode='before')
-    @classmethod
     def sanitize_strings(cls, v):
         return sanitize_string(v)
 
@@ -290,7 +284,6 @@ class OfficerCreate(BaseModel):
     company: str = "" 
 
     @field_validator('jurisdiction', mode='before')
-    @classmethod
     def sanitize_jurisdiction(cls, v):
         return sanitize_string(v)
 
@@ -299,7 +292,6 @@ class RoleUpdate(BaseModel):
     jurisdiction: str = Field("Unknown", max_length=100)
 
     @field_validator('role', 'jurisdiction', mode='before')
-    @classmethod
     def sanitize_role(cls, v):
         return sanitize_string(v)
 
