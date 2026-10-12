@@ -705,8 +705,18 @@ async def login_insurance_policy(payload: dict, user_token: dict = Depends(verif
         pol_uid = policy_data.get("owner_uid")
         
         is_owner = (pol_email == user_email) or (pol_uid == user_uid)
-        if not is_owner and role not in ["admin", "insurance_agent"]:
-            raise HTTPException(status_code=403, detail="You do not have access to this policy.")
+        if not is_owner:
+            if role == "admin":
+                pass
+            elif role == "insurance_agent":
+                agent_comp = (user_token.get("company") or "").strip().lower()
+                pol_comp = (policy_data.get("company") or "").strip().lower()
+                agent_is_bc = "bcic" in agent_comp or "bcse" in agent_comp
+                pol_is_bc = "bcic" in pol_comp or "bcse" in pol_comp
+                if not (agent_comp == pol_comp or (agent_is_bc and pol_is_bc)):
+                    raise HTTPException(status_code=403, detail="Access denied. This policy belongs to another insurance underwriter.")
+            else:
+                raise HTTPException(status_code=403, detail="You do not have access to this policy.")
             
         return {"status": "success", "policy": policy_data}
     except HTTPException:
@@ -735,28 +745,30 @@ async def send_insurance_message(payload: dict, user_token: dict = Depends(verif
             
         pol_data = doc.to_dict()
         user_uid = user_token.get("uid")
-        user_email = user_token.get("email")
+        user_email = (user_token.get("email") or "").strip().lower()
         role = user_token.get("role")
-        is_owner = (pol_data.get("owner_uid") == user_uid) or (user_email and pol_data.get("user_email") == user_email)
+        pol_email = (pol_data.get("user_email") or "").strip().lower()
+        pol_uid = pol_data.get("owner_uid")
+        company = pol_data.get("company", "BCIC")
+        
+        is_owner = (pol_uid == user_uid) or (user_email and pol_email == user_email)
         
         if not is_owner and role not in ["admin", "insurance_agent"]:
             raise HTTPException(status_code=403, detail="Access denied")
             
-        db.collection("insurance_messages").add({
+        # Store message with explicit company tag for tenant isolation
+        msg_doc = {
             "policy_number": policy_num,
+            "company": company,
             "sender_uid": user_uid,
             "sender_email": user_email,
+            "sender_role": role or "civilian",
             "message": msg_text,
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
-        })
-        admin_email = os.environ.get("SENDER_EMAIL")
-        if admin_email:
-            print("\n--- [ADMIN INBOX ALERT] ---")
-            print(f"To: {admin_email}")
-            print(f"Subject: Secure Message Received - Policy {policy_num}")
-            print(f"Message: User {user_email} sent: {msg_text}")
-            print("---------------------------\n")
-        return {"status": "success"}
+        }
+        db.collection("insurance_messages").add(msg_doc)
+        
+        return {"status": "success", "message": msg_doc}
     except HTTPException:
         raise
     except Exception as e:
@@ -769,12 +781,120 @@ async def get_insurance_messages(policy_number: str, user_token: dict = Depends(
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
-        docs = db.collection("insurance_messages").where(filter=FieldFilter("policy_number", "==", policy_number)).stream()
+        policy_num = policy_number.strip().upper()
+        # Verify ownership or agent access
+        doc_ref = db.collection("insurance_policies").document(policy_num)
+        doc = doc_ref.get()
+        if doc.exists:
+            pol_data = doc.to_dict()
+            user_uid = user_token.get("uid")
+            user_email = (user_token.get("email") or "").strip().lower()
+            role = user_token.get("role")
+            pol_email = (pol_data.get("user_email") or "").strip().lower()
+            pol_uid = pol_data.get("owner_uid")
+            is_owner = (pol_uid == user_uid) or (user_email and pol_email == user_email)
+            if not is_owner:
+                if role == "admin":
+                    pass
+                elif role == "insurance_agent":
+                    agent_comp = (user_token.get("company") or "").strip().lower()
+                    pol_comp = (pol_data.get("company") or "").strip().lower()
+                    agent_is_bc = "bcic" in agent_comp or "bcse" in agent_comp
+                    pol_is_bc = "bcic" in pol_comp or "bcse" in pol_comp
+                    if not (agent_comp == pol_comp or (agent_is_bc and pol_is_bc)):
+                        raise HTTPException(status_code=403, detail="Unauthorized - competitor policy")
+                else:
+                    raise HTTPException(status_code=403, detail="Unauthorized")
+
+        docs = db.collection("insurance_messages").where(filter=FieldFilter("policy_number", "==", policy_num)).stream()
         messages = [d.to_dict() for d in docs]
         messages.sort(key=lambda x: x.get("timestamp", ""))
         return messages
+    except HTTPException:
+        raise
     except Exception as e:
         return []
+
+
+@app.get("/api/insurance/company-messages")
+async def get_company_insurance_messages(company: Optional[str] = None, user_token: dict = Depends(verify_auth)):
+    """Enforces company tenant isolation: agents only see messages for their company (e.g. BCIC)"""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    role = user_token.get("role")
+    if role not in ["insurance_agent", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    target_company = user_token.get("company") or company
+    try:
+        # Collect policy numbers belonging to this company
+        company_policies = set()
+        if target_company:
+            t_comp = target_company.lower()
+            p_docs = db.collection("insurance_policies").stream()
+            for p in p_docs:
+                p_dict = p.to_dict()
+                p_comp = (p_dict.get("company") or "").lower()
+                if t_comp in p_comp or p_comp in t_comp or ("bcic" in t_comp and "bcse" in p_comp) or ("bcse" in t_comp and "bcic" in p_comp):
+                    company_policies.add(p.id.upper())
+                    if p_dict.get("policy_number"):
+                        company_policies.add(p_dict.get("policy_number").upper())
+                        
+        docs = db.collection("insurance_messages").stream()
+        messages = []
+        for d in docs:
+            m = d.to_dict()
+            m["id"] = d.id
+            msg_comp = (m.get("company") or "").lower()
+            msg_pol = (m.get("policy_number") or "").upper()
+            
+            # Superadmin gets all if no company constraint
+            if not target_company and role == "admin":
+                messages.append(m)
+            elif target_company:
+                t_comp = target_company.lower()
+                matches_company = (t_comp in msg_comp or msg_comp in t_comp or 
+                                  ("bcic" in t_comp and "bcse" in msg_comp) or 
+                                  ("bcse" in t_comp and "bcic" in msg_comp))
+                matches_policy = msg_pol in company_policies
+                if matches_company or matches_policy:
+                    messages.append(m)
+                    
+        messages.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return messages
+    except Exception as e:
+        print(f"Error fetching company messages: {e}")
+        return []
+
+
+@app.post("/api/insurance/reply")
+async def reply_insurance_message(payload: dict, user_token: dict = Depends(verify_auth)):
+    """Allows insurance agent to reply to civilian policy message thread"""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    role = user_token.get("role")
+    if role not in ["insurance_agent", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    policy_num = payload.get("policy_number", "").strip().upper()
+    msg_text = payload.get("message", "").strip()
+    if not policy_num or not msg_text:
+        raise HTTPException(status_code=400, detail="Policy number and reply message required")
+        
+    doc = db.collection("insurance_policies").document(policy_num).get()
+    comp = doc.to_dict().get("company", "Insurance Provider") if doc.exists else "Insurance Provider"
+    
+    reply_doc = {
+        "policy_number": policy_num,
+        "company": comp,
+        "sender_uid": user_token.get("uid"),
+        "sender_email": user_token.get("email"),
+        "sender_role": "agent",
+        "message": msg_text,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+    db.collection("insurance_messages").add(reply_doc)
+    return {"status": "success", "reply": reply_doc}
 
 
 @app.post("/api/insurance/register_client")
@@ -926,6 +1046,7 @@ async def submit_insurance_claim(payload: dict, user_token: dict = Depends(verif
 
 @app.get("/api/insurance/claims")
 async def get_insurance_claims(company: Optional[str] = None, user_token: dict = Depends(verify_auth)):
+    """Strict tenant isolation: agents only see claims for their assigned company (e.g. BCIC)"""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
@@ -935,25 +1056,23 @@ async def get_insurance_claims(company: Optional[str] = None, user_token: dict =
             
         target_company = user_token.get("company") or company
         
-        if not target_company:
-            if role == "admin":
-                docs = db.collection("insurance_policies").stream()
-                claims = []
-                for doc in docs:
-                    claim_data = doc.to_dict()
-                    if claim_data.get("stage", 1) >= 1:
-                        claims.append(claim_data)
-                return claims
-            raise HTTPException(status_code=400, detail="No company associated with agent")
-            
-        docs = db.collection("insurance_policies").where(filter=FieldFilter("company", "==", target_company)).stream()
-        
+        docs = db.collection("insurance_policies").stream()
         claims = []
         for doc in docs:
             claim_data = doc.to_dict()
-            if claim_data.get("stage", 1) >= 1:
+            if claim_data.get("stage", 1) < 1:
+                continue
+                
+            if not target_company and role == "admin":
                 claims.append(claim_data)
-            
+            elif target_company:
+                c_comp = (claim_data.get("company") or "").lower()
+                t_comp = target_company.lower()
+                if (t_comp in c_comp or c_comp in t_comp or 
+                   ("bcic" in t_comp and "bcse" in c_comp) or 
+                   ("bcse" in t_comp and "bcic" in c_comp)):
+                    claims.append(claim_data)
+                    
         return claims
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
