@@ -253,6 +253,7 @@ import smtplib
 
 
 import urllib.request
+import urllib.error
 
 def dispatch_email_alert(recipient: str, subject: str, html_content: str, text_content: str = "") -> dict:
     """Dispatches email alert using the best available provider (Resend HTTPS API -> Gmail SMTP -> FormSubmit HTTP)."""
@@ -283,6 +284,10 @@ def dispatch_email_alert(recipient: str, subject: str, html_content: str, text_c
                 print(f"[SUCCESS] Email delivered to {recipient} via Resend API: {resp_data}")
                 results.update({"provider": "Resend API", "success": True, "details": resp_data})
                 return results
+        except urllib.error.HTTPError as h_err:
+            err_body = h_err.read().decode("utf-8", errors="ignore")
+            print(f"[ERROR] Resend API HTTP error {h_err.code}: {err_body}")
+            results["resend_error"] = f"{h_err.code}: {err_body}"
         except Exception as r_err:
             print(f"[WARN] Resend API dispatch failed ({r_err}), attempting SMTP fallback...")
             results["resend_error"] = str(r_err)
@@ -451,9 +456,6 @@ def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict)
 def send_claim_submitted_email_to_insurance(policy_number: str, company: str, incident_id: str, client_email: str):
     """Sends a free email notification to the Insurance Agency Desk when a claim is linked."""
     def _worker():
-        sender = os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL") or "yourgmail@gmail.com"
-        password = (os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "your-16-character-app-password").replace(" ", "").strip()
-        
         recipients = set()
         default_insurance_email = os.environ.get(f"INSURANCE_EMAIL_{company.upper()}", os.environ.get("INSURANCE_NOTIFY_EMAIL", "claims@insurance.gov.jm"))
         if default_insurance_email:
@@ -477,72 +479,55 @@ def send_claim_submitted_email_to_insurance(policy_number: str, company: str, in
         recipient_list = sorted(list(recipients))
         print(f"[NOTIFICATION LOG] New Claim for {policy_number} ({company}). Target Insurers: {recipient_list}")
 
-        if not sender or not password or password == "your-16-character-app-password" or "@" not in sender:
-            print(f"[INFO] EMAIL_SENDER and EMAIL_APP_PASSWORD not set with live credentials. Alert recorded for dispatch to insurers: {recipient_list}.")
-            return
-
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = f"[New Claim Forwarded] Policy {policy_number} ({company})"
-            msg["From"] = f"JA Insurance Portal <{sender}>"
-            msg["To"] = ", ".join(recipient_list)
-
-            html = f"""
-            <html>
-              <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 24px; color: #1e293b;">
-                <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-                  <div style="background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%); padding: 24px; color: #ffffff;">
-                    <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff;">{company} Claims Desk</h1>
-                    <p style="margin: 6px 0 0 0; font-size: 13px; color: #bfdbfe;">New Policy Claim & Accident Dossier Forwarded</p>
-                  </div>
-                  <div style="padding: 24px;">
-                    <div style="background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;">
-                      <p style="margin: 0; font-size: 14px; font-weight: bold; color: #1e40af;">Claim Initialized & Forwarded to Adjuster Review</p>
-                      <p style="margin: 4px 0 0 0; font-size: 12px; color: #2563eb;">Current Status: Stage 2 of 5 (Under Investigation)</p>
-                    </div>
-                    
-                    <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px;">
-                      <tr>
-                        <td style="padding: 8px 0; color: #64748b; font-weight: bold; width: 35%;">Policy Number:</td>
-                        <td style="padding: 8px 0; color: #0f172a; font-weight: 700; font-family: monospace;">{policy_number}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Insurance Provider:</td>
-                        <td style="padding: 8px 0; color: #0f172a;">{company}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Client Email:</td>
-                        <td style="padding: 8px 0; color: #0f172a;">{client_email}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Linked Incident ID:</td>
-                        <td style="padding: 8px 0; color: #0f172a; font-family: monospace;">{incident_id or 'N/A'}</td>
-                      </tr>
-                    </table>
-
-                    <div style="text-align: center; margin-top: 24px;">
-                      <a href="https://ja-accident-report-front-end.vercel.app/insurance_admin.html" style="background-color: #2563eb; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 13px; display: inline-block;">Open Claims Console &rarr;</a>
-                    </div>
-                  </div>
-                  <div style="background-color: #f1f5f9; padding: 16px 24px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #64748b; text-align: center;">
-                    JA Accident Report Claims Automation &bull; Direct Agency Dispatch
-                  </div>
+        subject = f"[New Claim Forwarded] Policy {policy_number} ({company})"
+        html = f"""
+        <html>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 24px; color: #1e293b;">
+            <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+              <div style="background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%); padding: 24px; color: #ffffff;">
+                <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff;">{company} Claims Desk</h1>
+                <p style="margin: 6px 0 0 0; font-size: 13px; color: #bfdbfe;">New Policy Claim & Accident Dossier Forwarded</p>
+              </div>
+              <div style="padding: 24px;">
+                <div style="background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;">
+                  <p style="margin: 0; font-size: 14px; font-weight: bold; color: #1e40af;">Claim Initialized & Forwarded to Adjuster Review</p>
+                  <p style="margin: 4px 0 0 0; font-size: 12px; color: #2563eb;">Current Status: Stage 2 of 5 (Under Investigation)</p>
                 </div>
-              </body>
-            </html>
-            """
-            msg.attach(MIMEText(html, "html"))
-            
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(sender, password)
-                for rec in recipient_list:
-                    try:
-                        server.sendmail(sender, rec, msg.as_string())
-                    except Exception as re:
-                        print(f"[ERROR] Error sending to {rec}: {re}")
-            print(f"[SUCCESS] Claim email dispatched to {recipient_list}")
-        except Exception as e:
-            print(f"[ERROR] Error sending claim email: {e}")
+                
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: bold; width: 35%;">Policy Number:</td>
+                    <td style="padding: 8px 0; color: #0f172a; font-weight: 700; font-family: monospace;">{policy_number}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Insurance Provider:</td>
+                    <td style="padding: 8px 0; color: #0f172a;">{company}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Client Email:</td>
+                    <td style="padding: 8px 0; color: #0f172a;">{client_email}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Linked Incident ID:</td>
+                    <td style="padding: 8px 0; color: #0f172a; font-family: monospace;">{incident_id or 'N/A'}</td>
+                  </tr>
+                </table>
+
+                <div style="text-align: center; margin-top: 24px;">
+                  <a href="https://ja-accident-report-front-end.vercel.app/insurance_admin.html" style="background-color: #2563eb; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 13px; display: inline-block;">Open Claims Console &rarr;</a>
+                </div>
+              </div>
+              <div style="background-color: #f1f5f9; padding: 16px 24px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #64748b; text-align: center;">
+                JA Accident Report Claims Automation &bull; Direct Agency Dispatch
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+        plain_text = f"New Claim Forwarded for Policy {policy_number} ({company}). Client: {client_email}. Incident: {incident_id}"
+
+        for rec in recipient_list:
+            dispatch_email_alert(rec, subject, html, plain_text)
 
     threading.Thread(target=_worker, daemon=True).start()
 
