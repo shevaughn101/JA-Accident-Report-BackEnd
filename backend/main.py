@@ -32,7 +32,7 @@ def send_email_notification(uid: str, subject: str, message: str):
             print("User has no email.")
             return
             
-        print(f"\n--- [EMAIL SYSTEM LOG] ---")
+        print("\n--- [EMAIL SYSTEM LOG] ---\n")
         print(f"To: {to_email}")
         print(f"Subject: {subject}")
         print(f"Message: {message}")
@@ -668,7 +668,7 @@ async def create_insurance_policy(payload: dict, user_token: dict = Depends(requ
 
 
 @app.post("/api/insurance/login")
-async def login_insurance_policy(payload: dict, user_token: dict = Depends(require_civilian)):
+async def login_insurance_policy(payload: dict, user_token: dict = Depends(verify_auth)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
@@ -683,7 +683,12 @@ async def login_insurance_policy(payload: dict, user_token: dict = Depends(requi
             raise HTTPException(status_code=404, detail="Policy not found")
             
         policy_data = doc.to_dict()
-        if policy_data.get("user_email") != user_token.get("email"):
+        user_email = user_token.get("email")
+        user_uid = user_token.get("uid")
+        role = user_token.get("role")
+        
+        is_owner = (policy_data.get("user_email") == user_email) or (policy_data.get("owner_uid") == user_uid)
+        if not is_owner and role not in ["admin", "insurance_agent"]:
             raise HTTPException(status_code=403, detail="You do not have access to this policy.")
             
         return {"status": "success", "policy": policy_data}
@@ -695,7 +700,7 @@ async def login_insurance_policy(payload: dict, user_token: dict = Depends(requi
 
 
 @app.post("/api/insurance/message")
-async def send_insurance_message(payload: dict, user_token: dict = Depends(require_civilian)):
+async def send_insurance_message(payload: dict, user_token: dict = Depends(verify_auth)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
@@ -708,46 +713,52 @@ async def send_insurance_message(payload: dict, user_token: dict = Depends(requi
         doc_ref = db.collection("insurance_policies").document(policy_num)
         doc = doc_ref.get()
         
-        if not doc.exists or doc.to_dict().get("owner_uid") != user_token.get("uid"):
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Policy not found")
+            
+        pol_data = doc.to_dict()
+        user_uid = user_token.get("uid")
+        user_email = user_token.get("email")
+        role = user_token.get("role")
+        is_owner = (pol_data.get("owner_uid") == user_uid) or (user_email and pol_data.get("user_email") == user_email)
+        
+        if not is_owner and role not in ["admin", "insurance_agent"]:
             raise HTTPException(status_code=403, detail="Access denied")
+            
         db.collection("insurance_messages").add({
             "policy_number": policy_num,
-            "sender_uid": user_token.get("uid"),
+            "sender_uid": user_uid,
+            "sender_email": user_email,
             "message": msg_text,
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
         })
-        admin_email = os.environ.get("SENDER_EMAIL") # Using sender email as admin inbox for demo
+        admin_email = os.environ.get("SENDER_EMAIL")
         if admin_email:
-            print(f"\n--- [ADMIN INBOX ALERT] ---")
+            print("\n--- [ADMIN INBOX ALERT] ---")
             print(f"To: {admin_email}")
             print(f"Subject: Secure Message Received - Policy {policy_num}")
-            print(f"Message: A user has sent a secure message to their insurance agent: '{msg_text}'")
-            print(f"---------------------------\n")
-            
-            SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD")
-            if SENDER_PASSWORD:
-                msg = EmailMessage()
-                msg.set_content(f"A user on Policy {policy_num} sent a message:\n\n{msg_text}")
-                msg['Subject'] = f"Secure Message - {policy_num}"
-                msg['From'] = f"JA Accident Report <{admin_email}>"
-                msg['To'] = admin_email
-                with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-                    smtp.login(admin_email, SENDER_PASSWORD)
-                    smtp.send_message(msg)
-                    
+            print(f"Message: User {user_email} sent: {msg_text}")
+            print("---------------------------\n")
         return {"status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error sending message: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
-class ClientRegister(BaseModel):
-    email: str
-    password: str
-    policy_number: str
-    company: str
-    payment_amount: float
-    next_payment_date: str
+@app.get("/api/insurance/messages/{policy_number}")
+async def get_insurance_messages(policy_number: str, user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        docs = db.collection("insurance_messages").where(filter=FieldFilter("policy_number", "==", policy_number)).stream()
+        messages = [d.to_dict() for d in docs]
+        messages.sort(key=lambda x: x.get("timestamp", ""))
+        return messages
+    except Exception as e:
+        return []
+
 
 @app.post("/api/insurance/register_client")
 async def register_insurance_client(client: ClientRegister, user_token: dict = Depends(verify_auth)):
