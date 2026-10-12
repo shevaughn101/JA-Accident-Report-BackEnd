@@ -255,9 +255,13 @@ import smtplib
 def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict):
     """Sends a free email notification to all assigned JA Police Admins when a new report is filed."""
     def _worker():
-        sender = os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL") or "yourgmail@gmail.com"
-        password = (os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "your-16-character-app-password").replace(" ", "").strip()
-        default_admin_email = os.environ.get("JA_ADMIN_EMAIL") or "admin@ja-accident-report.com"
+        sender = (os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL") or "").strip()
+        password = (os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "").replace(" ", "").strip()
+        default_admin_email = (os.environ.get("JA_ADMIN_EMAIL") or "admin@ja-accident-report.com").strip()
+        
+        # If sender was left as placeholder or empty, fallback to JA_ADMIN_EMAIL if it's a real address
+        if (not sender or sender.lower() == "yourgmail@gmail.com") and default_admin_email and "@" in default_admin_email:
+            sender = default_admin_email
         
         inc_type = incident_data.get("type") or incident_data.get("incident_type") or "Accident"
         location = incident_data.get("location") or "Unspecified Location"
@@ -268,7 +272,7 @@ def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict)
         # Collect all assigned admins:
         admin_recipients = set()
         if default_admin_email and "@" in default_admin_email:
-            admin_recipients.add(default_admin_email.strip().lower())
+            admin_recipients.add(default_admin_email.lower())
         admin_recipients.add("admin@ja-accident-report.com")
         admin_recipients.add("shevaughn@example.com")
 
@@ -287,11 +291,11 @@ def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict)
         print(f"[NOTIFICATION LOG] New Report {incident_id} filed in {jurisdiction}. Target Admins: {recipient_list}")
         
         if not sender or not password or password == "your-16-character-app-password" or "@" not in sender:
-            print(f"[INFO] EMAIL_SENDER and EMAIL_APP_PASSWORD are set to placeholder values. Alert recorded for dispatch to assigned admins: {recipient_list}. Set real 16-character Google App Password in .env to dispatch outgoing emails.")
+            print(f"[INFO] EMAIL_SENDER ({sender}) or EMAIL_APP_PASSWORD is not configured with live credentials. Alert recorded for dispatch to assigned admins: {recipient_list}.")
             return
 
-        try:
-            for admin_email in recipient_list:
+        for admin_email in recipient_list:
+            try:
                 msg = MIMEMultipart("alternative")
                 msg["Subject"] = f"[JA Police Alert] New Accident Report: {inc_type} - {location}"
                 msg["From"] = f"JA Accident Emergency System <{sender}>"
@@ -348,12 +352,28 @@ def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict)
                 """
                 msg.attach(MIMEText(html, "html"))
                 
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                    server.login(sender, password)
-                    server.sendmail(sender, admin_email, msg.as_string())
-                print(f"[SUCCESS] Incident alert email sent to {admin_email}")
-        except Exception as e:
-            print(f"[ERROR] Error sending incident alert email: {e}")
+                # Attempt SSL on port 465, with fallback to TLS on port 587
+                sent_ok = False
+                try:
+                    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=12) as server:
+                        server.login(sender, password)
+                        server.sendmail(sender, admin_email, msg.as_string())
+                        sent_ok = True
+                except Exception as s_err:
+                    print(f"[WARN] Port 465 SSL dispatch failed ({s_err}), attempting Port 587 STARTTLS...")
+                    try:
+                        with smtplib.SMTP("smtp.gmail.com", 587, timeout=12) as server:
+                            server.starttls()
+                            server.login(sender, password)
+                            server.sendmail(sender, admin_email, msg.as_string())
+                            sent_ok = True
+                    except Exception as t_err:
+                        print(f"[ERROR] Port 587 TLS dispatch also failed: {t_err}")
+
+                if sent_ok:
+                    print(f"[SUCCESS] Incident alert email delivered to {admin_email}")
+            except Exception as e:
+                print(f"[ERROR] Error preparing/sending alert email to {admin_email}: {e}")
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -512,6 +532,15 @@ class OfficerCreate(BaseModel):
     @field_validator('jurisdiction', mode='before')
     def sanitize_jurisdiction(cls, v):
         return sanitize_string(v)
+
+class ClientRegister(BaseModel):
+    email: EmailStr
+    password: str
+    policy_number: str
+    company: str
+    payment_amount: Optional[str] = None
+    next_payment_date: Optional[str] = None
+
 
 class RoleUpdate(BaseModel):
     role: str = Field(..., max_length=50)
