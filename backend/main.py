@@ -75,6 +75,16 @@ for _search_dir in [os.path.dirname(__file__), os.path.dirname(os.path.dirname(_
             pass
 
 app = FastAPI(title="JA Accident Report API")
+
+@app.get("/")
+def root_status():
+    return {
+        "status": "online",
+        "service": "JA Accident Report API",
+        "version": "1.0.0",
+        "message": "Backend is live and healthy"
+    }
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
