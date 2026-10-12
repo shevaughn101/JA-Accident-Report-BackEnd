@@ -834,24 +834,38 @@ async def create_insurance_policy_agent(payload: dict, user_token: dict = Depend
         raise HTTPException(status_code=403, detail="Unauthorized")
         
     try:
-        user_email = payload.get("user_email")
-        policy_num = payload.get("policy_number")
+        raw_email = payload.get("user_email", "")
+        raw_pol = payload.get("policy_number", "")
         
-        if not user_email or not policy_num:
+        if not raw_email or not raw_pol:
             raise HTTPException(status_code=400, detail="User email and policy number required")
             
+        user_email = raw_email.strip().lower()
+        policy_num = raw_pol.strip().upper()
+        
         policy_data = {
             "user_email": user_email,
             "policy_number": policy_num,
             "company": payload.get("company", "Unknown"),
-            "payment_amount": payload.get("payment_amount", 0.0),
+            "payment_amount": float(payload.get("payment_amount", 0.0) or 0.0),
             "next_payment_date": payload.get("next_payment_date", ""),
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "stage": 1
+            "stage": 1,
+            "assigned_by_admin": True
         }
         
-        db.collection("insurance_policies").document(policy_num).set(policy_data)
-        return {"message": f"Successfully assigned policy {policy_num} to {user_email}", "policy_number": policy_num}
+        # Link owner_uid if user account exists in Firebase Auth
+        try:
+            user_record = auth.get_user_by_email(user_email)
+            if user_record:
+                policy_data["owner_uid"] = user_record.uid
+        except Exception:
+            pass
+            
+        db.collection("insurance_policies").document(policy_num).set(policy_data, merge=True)
+        return {"message": f"Successfully assigned policy {policy_num} to {user_email}", "policy_number": policy_num, "policy": policy_data}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -933,13 +947,15 @@ async def get_my_insurance_claims(user_token: dict = Depends(verify_auth)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
-        user_email = user_token.get("email")
+        user_email = (user_token.get("email") or "").strip().lower()
         user_uid = user_token.get("uid")
         docs = db.collection("insurance_policies").stream()
         my_claims = []
         for doc in docs:
             claim_data = doc.to_dict()
-            if (user_email and claim_data.get("user_email") == user_email) or (user_uid and claim_data.get("owner_uid") == user_uid):
+            pol_email = (claim_data.get("user_email") or "").strip().lower()
+            pol_uid = claim_data.get("owner_uid")
+            if (user_email and pol_email == user_email) or (user_uid and pol_uid == user_uid):
                 my_claims.append(claim_data)
         return my_claims
     except Exception as e:
