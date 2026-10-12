@@ -231,6 +231,194 @@ def send_assignment_email(officer_email: str, incident_id: str):
 
 
 
+import threading
+import smtplib
+
+
+def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict):
+    """Sends a free email notification to the JA Police Admin when a new report is filed."""
+    def _worker():
+        sender = os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL")
+        password = os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD")
+        admin_email = os.environ.get("JA_ADMIN_EMAIL", "admin@ja-accident-report.com")
+        
+        inc_type = incident_data.get("type") or incident_data.get("incident_type") or "Accident"
+        location = incident_data.get("location") or "Unspecified Location"
+        jurisdiction = incident_data.get("jurisdiction") or "National"
+        description = incident_data.get("description") or "No description provided."
+        timestamp = incident_data.get("timestamp") or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        print(f"📧 [NOTIFICATION LOG] New Report {incident_id} filed in {jurisdiction}. Target Admin: {admin_email}")
+        
+        if not sender or not password:
+            print("ℹ️ Note: EMAIL_SENDER and EMAIL_APP_PASSWORD not set in environment. Real email dispatch skipped (logged to console & in-app notifications).")
+            return
+
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"🚨 [JA Police Alert] New Accident Report: {inc_type} - {location}"
+            msg["From"] = f"JA Accident Emergency System <{sender}>"
+            msg["To"] = admin_email
+
+            html = f"""
+            <html>
+              <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 24px; color: #1e293b;">
+                <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                  <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 24px; color: #ffffff;">
+                    <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff;">JA Police Accident Alert</h1>
+                    <p style="margin: 6px 0 0 0; font-size: 13px; color: #94a3b8;">Official Incident Notification Dispatch</p>
+                  </div>
+                  <div style="padding: 24px;">
+                    <div style="background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;">
+                      <p style="margin: 0; font-size: 14px; font-weight: bold; color: #991b1b;">New Civilian Incident Submitted</p>
+                      <p style="margin: 4px 0 0 0; font-size: 12px; color: #b91c1c;">Incident Reference ID: {incident_id}</p>
+                    </div>
+                    
+                    <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px;">
+                      <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: bold; width: 35%;">Incident Type:</td>
+                        <td style="padding: 8px 0; color: #0f172a; font-weight: 600;">{inc_type}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Location:</td>
+                        <td style="padding: 8px 0; color: #0f172a;">{location}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Parish / Jurisdiction:</td>
+                        <td style="padding: 8px 0; color: #0f172a;">{jurisdiction}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Filed At:</td>
+                        <td style="padding: 8px 0; color: #0f172a;">{timestamp}</td>
+                      </tr>
+                    </table>
+
+                    <div style="background: #f8fafc; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+                      <p style="margin: 0 0 8px 0; font-size: 12px; font-weight: bold; text-transform: uppercase; color: #64748b;">Description</p>
+                      <p style="margin: 0; font-size: 13px; line-height: 1.5; color: #334155;">{description}</p>
+                    </div>
+
+                    <div style="text-align: center; margin-top: 24px;">
+                      <a href="https://ja-accident-report-front-end.vercel.app/officer_feed.html" style="background-color: #0f172a; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 13px; display: inline-block;">View Officer Incident Feed &rarr;</a>
+                    </div>
+                  </div>
+                  <div style="background-color: #f1f5f9; padding: 16px 24px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #64748b; text-align: center;">
+                    Jamaica Emergency Road Safety Platform &bull; Automated Police Admin Dispatch
+                  </div>
+                </div>
+              </body>
+            </html>
+            """
+            msg.attach(MIMEText(html, "html"))
+            
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(sender, password)
+                server.sendmail(sender, admin_email, msg.as_string())
+            print(f"✅ Success: Incident alert email sent to {admin_email}")
+        except Exception as e:
+            print(f"❌ Error sending email to {admin_email}: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def send_claim_submitted_email_to_insurance(policy_number: str, company: str, incident_id: str, client_email: str):
+    """Sends a free email notification to the Insurance Agency Desk when a claim is linked."""
+    def _worker():
+        sender = os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL")
+        password = os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD")
+        
+        recipients = set()
+        default_insurance_email = os.environ.get(f"INSURANCE_EMAIL_{company.upper()}", os.environ.get("INSURANCE_NOTIFY_EMAIL", "claims@insurance.gov.jm"))
+        recipients.add(default_insurance_email)
+        
+        try:
+            if db:
+                agent_docs = db.collection("users").where(filter=FieldFilter("role", "==", "insurance_agent")).stream()
+                for doc in agent_docs:
+                    data = doc.to_dict()
+                    u_comp = (data.get("company") or "").lower()
+                    t_comp = company.lower()
+                    if (t_comp in u_comp or u_comp in t_comp or 
+                        ("bcic" in t_comp and "bcse" in u_comp) or 
+                        ("bcse" in t_comp and "bcic" in u_comp)):
+                        if data.get("email"):
+                            recipients.add(data.get("email"))
+        except Exception as e:
+            print(f"Error querying company agents: {e}")
+
+        recipient_list = list(recipients)
+        print(f"📧 [NOTIFICATION LOG] New Claim for {policy_number} ({company}). Target Insurers: {recipient_list}")
+
+        if not sender or not password:
+            print("ℹ️ Note: EMAIL_SENDER and EMAIL_APP_PASSWORD not set in environment. Real email dispatch skipped (logged to console & in-app notifications).")
+            return
+
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"📋 [New Claim Forwarded] Policy {policy_number} ({company})"
+            msg["From"] = f"JA Insurance Portal <{sender}>"
+            msg["To"] = ", ".join(recipient_list)
+
+            html = f"""
+            <html>
+              <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 24px; color: #1e293b;">
+                <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                  <div style="background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%); padding: 24px; color: #ffffff;">
+                    <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff;">{company} Claims Desk</h1>
+                    <p style="margin: 6px 0 0 0; font-size: 13px; color: #bfdbfe;">New Policy Claim & Accident Dossier Forwarded</p>
+                  </div>
+                  <div style="padding: 24px;">
+                    <div style="background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;">
+                      <p style="margin: 0; font-size: 14px; font-weight: bold; color: #1e40af;">Claim Initialized & Forwarded to Adjuster Review</p>
+                      <p style="margin: 4px 0 0 0; font-size: 12px; color: #2563eb;">Current Status: Stage 2 of 5 (Under Investigation)</p>
+                    </div>
+                    
+                    <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px;">
+                      <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: bold; width: 35%;">Policy Number:</td>
+                        <td style="padding: 8px 0; color: #0f172a; font-weight: 700; font-family: monospace;">{policy_number}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Insurance Provider:</td>
+                        <td style="padding: 8px 0; color: #0f172a;">{company}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Client Email:</td>
+                        <td style="padding: 8px 0; color: #0f172a;">{client_email}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Linked Incident ID:</td>
+                        <td style="padding: 8px 0; color: #0f172a; font-family: monospace;">{incident_id or 'N/A'}</td>
+                      </tr>
+                    </table>
+
+                    <div style="text-align: center; margin-top: 24px;">
+                      <a href="https://ja-accident-report-front-end.vercel.app/insurance_admin.html" style="background-color: #2563eb; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 13px; display: inline-block;">Open Claims Console &rarr;</a>
+                    </div>
+                  </div>
+                  <div style="background-color: #f1f5f9; padding: 16px 24px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #64748b; text-align: center;">
+                    JA Accident Report Claims Automation &bull; Direct Agency Dispatch
+                  </div>
+                </div>
+              </body>
+            </html>
+            """
+            msg.attach(MIMEText(html, "html"))
+            
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(sender, password)
+                for rec in recipient_list:
+                    try:
+                        server.sendmail(sender, rec, msg.as_string())
+                    except Exception as re:
+                        print(f"Error sending to {rec}: {re}")
+            print(f"✅ Success: Claim email dispatched to {recipient_list}")
+        except Exception as e:
+            print(f"❌ Error sending claim email: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def sanitize_string(v: str) -> str:
     if not isinstance(v, str):
         return v
@@ -448,6 +636,11 @@ async def create_incident(request: Request, report: IncidentReport, user_token: 
         
         doc_ref = db.collection('incidents').document()
         doc_ref.set(report_dict)
+        # Free Email Notification to JA Police Admin
+        try:
+            send_incident_reported_email_to_admin(doc_ref.id, report_dict)
+        except Exception as ee:
+            print(f"Incident email trigger error: {ee}")
         
         try:
             db.collection('notifications').add({
@@ -901,8 +1094,8 @@ async def reply_insurance_message(payload: dict, user_token: dict = Depends(veri
 async def register_insurance_client(client: ClientRegister, user_token: dict = Depends(verify_auth)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    if user_token.get("role") not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    if user_token.get("role") != "insurance_agent":
+        raise HTTPException(status_code=403, detail="Policy issuance is restricted to authorized Insurance Company Agents. JA Police Administrators manage users and maintain oversight.")
         
     try:
         try:
@@ -941,8 +1134,8 @@ async def register_insurance_client(client: ClientRegister, user_token: dict = D
 async def update_insurance_status(payload: dict, user_token: dict = Depends(verify_auth)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    if user_token.get("role") not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    if user_token.get("role") != "insurance_agent":
+        raise HTTPException(status_code=403, detail="Policy issuance is restricted to authorized Insurance Company Agents. JA Police Administrators manage users and maintain oversight.")
         
     try:
         policy_num = payload.get("policy_number")
@@ -967,8 +1160,8 @@ async def update_insurance_status(payload: dict, user_token: dict = Depends(veri
 async def create_insurance_policy_agent(payload: dict, user_token: dict = Depends(verify_auth)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    if user_token.get("role") not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    if user_token.get("role") != "insurance_agent":
+        raise HTTPException(status_code=403, detail="Policy issuance is restricted to authorized Insurance Company Agents. JA Police Administrators manage users and maintain oversight.")
         
     try:
         raw_email = payload.get("user_email", "")
@@ -1005,6 +1198,57 @@ async def create_insurance_policy_agent(payload: dict, user_token: dict = Depend
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.post("/api/insurance/add-agent")
+async def add_agency_agent(payload: dict, user_token: dict = Depends(verify_auth)):
+    """Allows an Insurance Agent to add new agents to their own company portal."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+        
+    role = user_token.get("role")
+    if role not in ["insurance_agent", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    email = (payload.get("email") or "").strip().lower()
+    password = (payload.get("password") or "").strip()
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Agent email and temporary password required")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        
+    # Enforce company isolation:
+    if role == "insurance_agent":
+        company = user_token.get("company")
+        if not company:
+            raise HTTPException(status_code=400, detail="Agent has no company assigned")
+    else:
+        # Admin provisioning
+        company = payload.get("company", "BCIC")
+        
+    try:
+        # Create in Firebase Auth
+        new_user = auth.create_user(email=email, password=password)
+        # Set claims
+        auth.set_custom_user_claims(new_user.uid, {"role": "insurance_agent", "company": company})
+        # Save in Firestore users collection
+        db.collection("users").document(new_user.uid).set({
+            "email": email,
+            "role": "insurance_agent",
+            "company": company,
+            "created_by": user_token.get("uid"),
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        })
+        return {
+            "status": "success",
+            "message": f"Successfully authorized {company} Agent account for {email}",
+            "email": email,
+            "company": company,
+            "uid": new_user.uid
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/insurance/submit_claim")
