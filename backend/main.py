@@ -69,7 +69,7 @@ for _search_dir in [os.path.dirname(__file__), os.path.dirname(os.path.dirname(_
                         _k, _v = _eline.split("=", 1)
                         _k = _k.strip()
                         _v = _v.strip().strip('"').strip("'")
-                        if _k:
+                        if _k and not os.environ.get(_k):
                             os.environ[_k] = _v
         except Exception as _e:
             pass
@@ -252,16 +252,115 @@ import threading
 import smtplib
 
 
+import urllib.request
+
+def dispatch_email_alert(recipient: str, subject: str, html_content: str, text_content: str = "") -> dict:
+    """Dispatches email alert using the best available provider (Resend HTTPS API -> Gmail SMTP -> FormSubmit HTTP)."""
+    results = {"recipient": recipient, "provider": None, "success": False, "details": None}
+    
+    # Provider 1: Resend REST API (HTTPS port 443 - zero firewall/port blocking)
+    resend_key = (os.environ.get("RESEND_API_KEY") or "").strip()
+    if resend_key:
+        try:
+            from_addr = os.environ.get("RESEND_FROM", "JA Police Alert <onboarding@resend.dev>").strip()
+            payload = json.dumps({
+                "from": from_addr,
+                "to": [recipient],
+                "subject": subject,
+                "html": html_content
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.resend.com/emails",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {resend_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "JA-Accident-Report/1.0"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                resp_data = resp.read().decode("utf-8")
+                print(f"[SUCCESS] Email delivered to {recipient} via Resend API: {resp_data}")
+                results.update({"provider": "Resend API", "success": True, "details": resp_data})
+                return results
+        except Exception as r_err:
+            print(f"[WARN] Resend API dispatch failed ({r_err}), attempting SMTP fallback...")
+            results["resend_error"] = str(r_err)
+
+    # Provider 2: Gmail SMTP (Port 465 SSL or Port 587 TLS)
+    sender = (os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL") or "").strip()
+    password = (os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "").replace(" ", "").strip()
+    default_admin_email = (os.environ.get("JA_ADMIN_EMAIL") or "").strip()
+
+    if (not sender or sender.lower() == "yourgmail@gmail.com") and default_admin_email and "@" in default_admin_email:
+        sender = default_admin_email
+
+    if sender and password and password != "your-16-character-app-password" and "@" in sender:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"JA Accident Emergency System <{sender}>"
+        msg["To"] = recipient
+        msg.attach(MIMEText(html_content, "html"))
+
+        # Try Port 465 SSL
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=12) as server:
+                server.login(sender, password)
+                server.sendmail(sender, recipient, msg.as_string())
+            print(f"[SUCCESS] Email delivered to {recipient} via Gmail SMTP (Port 465 SSL)")
+            results.update({"provider": "Gmail SMTP (465)", "success": True, "details": "Delivered via Port 465"})
+            return results
+        except Exception as ssl_err:
+            print(f"[WARN] Port 465 SSL failed ({ssl_err}), trying Port 587 STARTTLS...")
+            results["smtp_465_error"] = str(ssl_err)
+
+        # Try Port 587 STARTTLS
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=12) as server:
+                server.starttls()
+                server.login(sender, password)
+                server.sendmail(sender, recipient, msg.as_string())
+            print(f"[SUCCESS] Email delivered to {recipient} via Gmail SMTP (Port 587 TLS)")
+            results.update({"provider": "Gmail SMTP (587)", "success": True, "details": "Delivered via Port 587"})
+            return results
+        except Exception as tls_err:
+            print(f"[WARN] Port 587 TLS failed ({tls_err}), checking HTTP fallback...")
+            results["smtp_587_error"] = str(tls_err)
+
+    # Provider 3: FormSubmit HTTPS API (100% Free HTTPS REST delivery)
+    try:
+        clean_text = text_content or "JA Police Alert: A new accident report has been filed. Please check your dashboard."
+        fs_payload = json.dumps({
+            "_subject": subject,
+            "message": clean_text,
+            "_template": "box"
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"https://formsubmit.co/ajax/{recipient}",
+            data=fs_payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "JA-Accident-Report/1.0"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            resp_data = resp.read().decode("utf-8")
+            print(f"[SUCCESS] Email delivered to {recipient} via FormSubmit HTTP: {resp_data}")
+            results.update({"provider": "FormSubmit HTTP", "success": True, "details": resp_data})
+            return results
+    except Exception as fs_err:
+        print(f"[ERROR] FormSubmit dispatch error: {fs_err}")
+        results["formsubmit_error"] = str(fs_err)
+
+    results["details"] = "All available dispatch providers attempted."
+    return results
+
+
 def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict):
     """Sends a free email notification to all assigned JA Police Admins when a new report is filed."""
     def _worker():
-        sender = (os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL") or "").strip()
-        password = (os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "").replace(" ", "").strip()
-        default_admin_email = (os.environ.get("JA_ADMIN_EMAIL") or "admin@ja-accident-report.com").strip()
-        
-        # If sender was left as placeholder or empty, fallback to JA_ADMIN_EMAIL if it's a real address
-        if (not sender or sender.lower() == "yourgmail@gmail.com") and default_admin_email and "@" in default_admin_email:
-            sender = default_admin_email
+        default_admin_email = (os.environ.get("JA_ADMIN_EMAIL") or "contactshevaughn124@gmail.com").strip()
         
         inc_type = incident_data.get("type") or incident_data.get("incident_type") or "Accident"
         location = incident_data.get("location") or "Unspecified Location"
@@ -275,6 +374,7 @@ def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict)
             admin_recipients.add(default_admin_email.lower())
         admin_recipients.add("admin@ja-accident-report.com")
         admin_recipients.add("shevaughn@example.com")
+        admin_recipients.add("contactshevaughn124@gmail.com")
 
         try:
             if db:
@@ -289,91 +389,61 @@ def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict)
 
         recipient_list = sorted(list(admin_recipients))
         print(f"[NOTIFICATION LOG] New Report {incident_id} filed in {jurisdiction}. Target Admins: {recipient_list}")
-        
-        if not sender or not password or password == "your-16-character-app-password" or "@" not in sender:
-            print(f"[INFO] EMAIL_SENDER ({sender}) or EMAIL_APP_PASSWORD is not configured with live credentials. Alert recorded for dispatch to assigned admins: {recipient_list}.")
-            return
+
+        subject = f"[JA Police Alert] New Accident Report: {inc_type} - {location}"
+        html = f"""
+        <html>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 24px; color: #1e293b;">
+            <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+              <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 24px; color: #ffffff;">
+                <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff;">JA Police Accident Alert</h1>
+                <p style="margin: 6px 0 0 0; font-size: 13px; color: #94a3b8;">Official Incident Notification Dispatch</p>
+              </div>
+              <div style="padding: 24px;">
+                <div style="background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;">
+                  <p style="margin: 0; font-size: 14px; font-weight: bold; color: #991b1b;">New Civilian Incident Submitted</p>
+                  <p style="margin: 4px 0 0 0; font-size: 12px; color: #b91c1c;">Incident Reference ID: {incident_id}</p>
+                </div>
+                
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px;">
+                  <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: bold; width: 35%;">Incident Type:</td>
+                    <td style="padding: 8px 0; color: #0f172a; font-weight: 600;">{inc_type}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Location:</td>
+                    <td style="padding: 8px 0; color: #0f172a;">{location}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Parish / Jurisdiction:</td>
+                    <td style="padding: 8px 0; color: #0f172a;">{jurisdiction}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Filed At:</td>
+                    <td style="padding: 8px 0; color: #0f172a;">{timestamp}</td>
+                  </tr>
+                </table>
+
+                <div style="background: #f8fafc; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+                  <p style="margin: 0 0 8px 0; font-size: 12px; font-weight: bold; text-transform: uppercase; color: #64748b;">Description</p>
+                  <p style="margin: 0; font-size: 13px; line-height: 1.5; color: #334155;">{description}</p>
+                </div>
+
+                <div style="text-align: center; margin-top: 24px;">
+                  <a href="https://ja-accident-report-front-end.vercel.app/officer_feed.html" style="background-color: #0f172a; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 13px; display: inline-block;">View Officer Incident Feed &rarr;</a>
+                </div>
+              </div>
+              <div style="background-color: #f1f5f9; padding: 16px 24px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #64748b; text-align: center;">
+                Jamaica Emergency Road Safety Platform &bull; Automated Police Admin Dispatch
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+        plain_text = f"JA Police Alert: New {inc_type} incident reported at {location} ({jurisdiction}). Description: {description}. Incident ID: {incident_id}"
 
         for admin_email in recipient_list:
-            try:
-                msg = MIMEMultipart("alternative")
-                msg["Subject"] = f"[JA Police Alert] New Accident Report: {inc_type} - {location}"
-                msg["From"] = f"JA Accident Emergency System <{sender}>"
-                msg["To"] = admin_email
-
-                html = f"""
-                <html>
-                  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 24px; color: #1e293b;">
-                    <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-                      <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 24px; color: #ffffff;">
-                        <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff;">JA Police Accident Alert</h1>
-                        <p style="margin: 6px 0 0 0; font-size: 13px; color: #94a3b8;">Official Incident Notification Dispatch</p>
-                      </div>
-                      <div style="padding: 24px;">
-                        <div style="background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;">
-                          <p style="margin: 0; font-size: 14px; font-weight: bold; color: #991b1b;">New Civilian Incident Submitted</p>
-                          <p style="margin: 4px 0 0 0; font-size: 12px; color: #b91c1c;">Incident Reference ID: {incident_id}</p>
-                        </div>
-                        
-                        <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px;">
-                          <tr>
-                            <td style="padding: 8px 0; color: #64748b; font-weight: bold; width: 35%;">Incident Type:</td>
-                            <td style="padding: 8px 0; color: #0f172a; font-weight: 600;">{inc_type}</td>
-                          </tr>
-                          <tr>
-                            <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Location:</td>
-                            <td style="padding: 8px 0; color: #0f172a;">{location}</td>
-                          </tr>
-                          <tr>
-                            <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Parish / Jurisdiction:</td>
-                            <td style="padding: 8px 0; color: #0f172a;">{jurisdiction}</td>
-                          </tr>
-                          <tr>
-                            <td style="padding: 8px 0; color: #64748b; font-weight: bold;">Filed At:</td>
-                            <td style="padding: 8px 0; color: #0f172a;">{timestamp}</td>
-                          </tr>
-                        </table>
-
-                        <div style="background: #f8fafc; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-                          <p style="margin: 0 0 8px 0; font-size: 12px; font-weight: bold; text-transform: uppercase; color: #64748b;">Description</p>
-                          <p style="margin: 0; font-size: 13px; line-height: 1.5; color: #334155;">{description}</p>
-                        </div>
-
-                        <div style="text-align: center; margin-top: 24px;">
-                          <a href="https://ja-accident-report-front-end.vercel.app/officer_feed.html" style="background-color: #0f172a; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 13px; display: inline-block;">View Officer Incident Feed &rarr;</a>
-                        </div>
-                      </div>
-                      <div style="background-color: #f1f5f9; padding: 16px 24px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #64748b; text-align: center;">
-                        Jamaica Emergency Road Safety Platform &bull; Automated Police Admin Dispatch
-                      </div>
-                    </div>
-                  </body>
-                </html>
-                """
-                msg.attach(MIMEText(html, "html"))
-                
-                # Attempt SSL on port 465, with fallback to TLS on port 587
-                sent_ok = False
-                try:
-                    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=12) as server:
-                        server.login(sender, password)
-                        server.sendmail(sender, admin_email, msg.as_string())
-                        sent_ok = True
-                except Exception as s_err:
-                    print(f"[WARN] Port 465 SSL dispatch failed ({s_err}), attempting Port 587 STARTTLS...")
-                    try:
-                        with smtplib.SMTP("smtp.gmail.com", 587, timeout=12) as server:
-                            server.starttls()
-                            server.login(sender, password)
-                            server.sendmail(sender, admin_email, msg.as_string())
-                            sent_ok = True
-                    except Exception as t_err:
-                        print(f"[ERROR] Port 587 TLS dispatch also failed: {t_err}")
-
-                if sent_ok:
-                    print(f"[SUCCESS] Incident alert email delivered to {admin_email}")
-            except Exception as e:
-                print(f"[ERROR] Error preparing/sending alert email to {admin_email}: {e}")
+            dispatch_email_alert(admin_email, subject, html, plain_text)
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -1447,3 +1517,32 @@ async def get_incident_for_insurance(incident_id: str, user_token: dict = Depend
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/test-email")
+@app.post("/api/test-email")
+async def test_email_diagnostic(target: Optional[str] = None):
+    """Diagnostic endpoint to test email dispatch live on the server and return results in JSON."""
+    recipient = (target or os.environ.get("JA_ADMIN_EMAIL") or "contactshevaughn124@gmail.com").strip()
+    
+    sender = (os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL") or "").strip()
+    password_set = bool(os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD"))
+    resend_set = bool(os.environ.get("RESEND_API_KEY"))
+    
+    subject = "[JA Police Test Alert] Diagnostic Email Dispatch Verification"
+    html_content = "<h2>JA Accident Report Email Test</h2><p>This is a live test email confirming that automated alerts are configured and delivering successfully.</p>"
+    text_content = "JA Accident Report Email Test: Automated alerts are configured and delivering successfully."
+    
+    dispatch_result = dispatch_email_alert(recipient, subject, html_content, text_content)
+    
+    return {
+        "status": "completed",
+        "configuration": {
+            "target_recipient": recipient,
+            "sender_configured": sender,
+            "password_configured": password_set,
+            "resend_api_configured": resend_set
+        },
+        "dispatch_result": dispatch_result
+    }
+
