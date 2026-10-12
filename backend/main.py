@@ -256,7 +256,7 @@ def send_incident_reported_email_to_admin(incident_id: str, incident_data: dict)
     """Sends a free email notification to all assigned JA Police Admins when a new report is filed."""
     def _worker():
         sender = os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL") or "yourgmail@gmail.com"
-        password = os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "your-16-character-app-password"
+        password = (os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "your-16-character-app-password").replace(" ", "").strip()
         default_admin_email = os.environ.get("JA_ADMIN_EMAIL") or "admin@ja-accident-report.com"
         
         inc_type = incident_data.get("type") or incident_data.get("incident_type") or "Accident"
@@ -362,7 +362,7 @@ def send_claim_submitted_email_to_insurance(policy_number: str, company: str, in
     """Sends a free email notification to the Insurance Agency Desk when a claim is linked."""
     def _worker():
         sender = os.environ.get("EMAIL_SENDER") or os.environ.get("SENDER_EMAIL") or "yourgmail@gmail.com"
-        password = os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "your-16-character-app-password"
+        password = (os.environ.get("EMAIL_APP_PASSWORD") or os.environ.get("SENDER_PASSWORD") or "your-16-character-app-password").replace(" ", "").strip()
         
         recipients = set()
         default_insurance_email = os.environ.get(f"INSURANCE_EMAIL_{company.upper()}", os.environ.get("INSURANCE_NOTIFY_EMAIL", "claims@insurance.gov.jm"))
