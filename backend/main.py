@@ -852,25 +852,38 @@ async def submit_insurance_claim(payload: dict, user_token: dict = Depends(verif
     try:
         policy_num = payload.get("policy_number")
         company = payload.get("company")
+        incident_id = payload.get("incident_id")
         if not policy_num or not company:
             raise HTTPException(status_code=400, detail="Missing required fields")
-        db.collection("insurance_policies").document(policy_num).update({"stage": 2, "incident_id": payload.get("incident_id")})
+        
+        doc_ref = db.collection("insurance_policies").document(policy_num)
+        claim_payload = {
+            "policy_number": policy_num,
+            "company": company,
+            "stage": 2,
+            "incident_id": incident_id,
+            "user_email": user_token.get("email", ""),
+            "owner_uid": user_token.get("uid", ""),
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        doc_ref.set(claim_payload, merge=True)
+
         db.collection("notifications").add({
             "target_user": f"insurance_{company}",
-            "title": f"New Claim Submitted",
+            "title": "New Claim Submitted",
             "body": f"A new claim has been submitted for policy {policy_num}.",
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "read": False,
             "type": "claim_submission"
         })
         
-        return {"status": "success"}
+        return {"status": "success", "claim": claim_payload}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/insurance/claims")
-async def get_insurance_claims(user_token: dict = Depends(verify_auth)):
+async def get_insurance_claims(company: Optional[str] = None, user_token: dict = Depends(verify_auth)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
@@ -878,18 +891,46 @@ async def get_insurance_claims(user_token: dict = Depends(verify_auth)):
         if role not in ["insurance_agent", "admin"]:
             raise HTTPException(status_code=403, detail="Unauthorized")
             
-        company = user_token.get("company")
-        if not company:
+        target_company = user_token.get("company") or company
+        
+        if not target_company:
+            if role == "admin":
+                docs = db.collection("insurance_policies").stream()
+                claims = []
+                for doc in docs:
+                    claim_data = doc.to_dict()
+                    if claim_data.get("stage", 1) >= 1:
+                        claims.append(claim_data)
+                return claims
             raise HTTPException(status_code=400, detail="No company associated with agent")
-        docs = db.collection("insurance_policies").where(filter=FieldFilter("company", "==", company)).stream()
+            
+        docs = db.collection("insurance_policies").where(filter=FieldFilter("company", "==", target_company)).stream()
         
         claims = []
         for doc in docs:
             claim_data = doc.to_dict()
-            if claim_data.get("stage", 1) > 1:
+            if claim_data.get("stage", 1) >= 1:
                 claims.append(claim_data)
             
         return claims
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/insurance/my-claims")
+async def get_my_insurance_claims(user_token: dict = Depends(verify_auth)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        user_email = user_token.get("email")
+        user_uid = user_token.get("uid")
+        docs = db.collection("insurance_policies").stream()
+        my_claims = []
+        for doc in docs:
+            claim_data = doc.to_dict()
+            if (user_email and claim_data.get("user_email") == user_email) or (user_uid and claim_data.get("owner_uid") == user_uid):
+                my_claims.append(claim_data)
+        return my_claims
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
