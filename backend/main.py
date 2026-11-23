@@ -1525,21 +1525,37 @@ async def get_my_insurance_claims(user_token: dict = Depends(verify_auth)):
 
         # Specific user provision for ssmith107: BCSE policy at Stage 4 (second-to-last process)
         if "ssmith107" in user_email:
-            ssmith_policy = {
-                "user_email": user_email,
-                "owner_uid": user_uid,
-                "policy_number": "BCSE-482910",
-                "company": "BCSE",
-                "payment_amount": 22000.0,
-                "next_payment_date": "2026-11-01",
-                "stage": 4,  # Fourth / second to last process (Stage 4 of 5)
-                "assigned_by_admin": True,
-                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-            }
-            try:
-                db.collection("insurance_policies").document("BCSE-482910").set(ssmith_policy, merge=True)
-            except Exception as e:
-                print(f"Error persisting ssmith policy: {e}")
+            pol_ref = db.collection("insurance_policies").document("BCSE-482910")
+            pol_doc = pol_ref.get()
+            if pol_doc.exists:
+                data = pol_doc.to_dict() or {}
+                ssmith_policy = {
+                    "user_email": user_email,
+                    "owner_uid": user_uid,
+                    "policy_number": "BCSE-482910",
+                    "company": "BCSE",
+                    "payment_amount": data.get("payment_amount", 22000.0),
+                    "next_payment_date": data.get("next_payment_date", "2026-11-01"),
+                    "stage": data.get("stage", 4),
+                    "assigned_by_admin": True,
+                    "updated_at": data.get("updated_at", datetime.datetime.now(datetime.timezone.utc).isoformat())
+                }
+            else:
+                ssmith_policy = {
+                    "user_email": user_email,
+                    "owner_uid": user_uid,
+                    "policy_number": "BCSE-482910",
+                    "company": "BCSE",
+                    "payment_amount": 22000.0,
+                    "next_payment_date": "2026-11-01",
+                    "stage": 4,  # Fourth / second to last process (Stage 4 of 5)
+                    "assigned_by_admin": True,
+                    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                }
+                try:
+                    pol_ref.set(ssmith_policy)
+                except Exception as e:
+                    print(f"Error persisting ssmith policy: {e}")
             return [ssmith_policy]
 
         docs = db.collection("insurance_policies").stream()
