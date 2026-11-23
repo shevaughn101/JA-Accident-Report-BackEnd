@@ -162,6 +162,16 @@ def require_officer(token: dict = Depends(verify_firebase_token)):
 def require_civilian(token: dict = Depends(verify_firebase_token)):
     return token
 
+def require_insurance_agent(token: dict = Depends(verify_firebase_token)):
+    role = token.get("role")
+    company = token.get("company")
+    if role != "insurance_agent" or not company:
+        raise HTTPException(
+            status_code=403, 
+            detail="Forbidden: This section is strictly restricted to licensed insurance agency agents. Police administrators and non-agents do not have access."
+        )
+    return token
+
 
 
 
@@ -615,9 +625,38 @@ class RoleUpdate(BaseModel):
     def sanitize_role(cls, v):
         return sanitize_string(v)
 
+class PasswordChange(BaseModel):
+    new_password: str = Field(..., min_length=6, max_length=128)
 
-
-
+@app.post("/api/auth/change-password")
+async def change_user_password(payload: PasswordChange, user_token: dict = Depends(verify_firebase_token)):
+    """Allows an authenticated officer, agent, or user created with a temporary password to set their permanent password."""
+    uid = user_token.get("uid")
+    if not uid:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+        
+    new_pwd = payload.new_password.strip()
+    if len(new_pwd) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+        
+    try:
+        auth.update_user(uid, password=new_pwd)
+        
+        # Clear must_change_password flag from custom claims
+        user_record = auth.get_user(uid)
+        claims = dict(user_record.custom_claims or {})
+        claims["must_change_password"] = False
+        auth.set_custom_user_claims(uid, claims)
+        
+        if db:
+            db.collection("users").document(uid).set({
+                "must_change_password": False,
+                "password_updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            }, merge=True)
+            
+        return {"status": "success", "message": "Password updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update password: {str(e)}")
 
 @app.post("/api/auth/verify")
 async def verify_auth(token: dict = Depends(verify_firebase_token)):
@@ -651,7 +690,7 @@ async def create_officer(officer: OfficerCreate, admin_token: dict = Depends(req
             password=officer.password,
             email_verified=True
         )
-        claims = {"role": target_role}
+        claims = {"role": target_role, "must_change_password": True}
         
         if target_role == "officer":
             claims["jurisdiction"] = officer.jurisdiction
@@ -666,6 +705,7 @@ async def create_officer(officer: OfficerCreate, admin_token: dict = Depends(req
                 "role": target_role,
                 "company": officer.company if target_role == "insurance_agent" else "",
                 "jurisdiction": officer.jurisdiction if target_role == "officer" else "",
+                "must_change_password": True,
                 "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
             }, merge=True)
 
@@ -1148,9 +1188,7 @@ async def get_insurance_messages(policy_number: str, user_token: dict = Depends(
             pol_uid = pol_data.get("owner_uid")
             is_owner = (pol_uid == user_uid) or (user_email and pol_email == user_email)
             if not is_owner:
-                if role == "admin":
-                    pass
-                elif role == "insurance_agent":
+                if role == "insurance_agent":
                     agent_comp = (user_token.get("company") or "").strip().lower()
                     pol_comp = (pol_data.get("company") or "").strip().lower()
                     agent_is_bc = "bcic" in agent_comp or "bcse" in agent_comp
@@ -1158,7 +1196,7 @@ async def get_insurance_messages(policy_number: str, user_token: dict = Depends(
                     if not (agent_comp == pol_comp or (agent_is_bc and pol_is_bc)):
                         raise HTTPException(status_code=403, detail="Unauthorized - competitor policy")
                 else:
-                    raise HTTPException(status_code=403, detail="Unauthorized")
+                    raise HTTPException(status_code=403, detail="Unauthorized. Police administrators and non-owners have no access to insurance messages.")
 
         docs = db.collection("insurance_messages").where(filter=FieldFilter("policy_number", "==", policy_num)).stream()
         messages = [d.to_dict() for d in docs]
@@ -1171,13 +1209,10 @@ async def get_insurance_messages(policy_number: str, user_token: dict = Depends(
 
 
 @app.get("/api/insurance/company-messages")
-async def get_company_insurance_messages(company: Optional[str] = None, user_token: dict = Depends(verify_auth)):
-    """Enforces company tenant isolation: agents only see messages for their company (e.g. BCIC)"""
+async def get_company_insurance_messages(company: Optional[str] = None, user_token: dict = Depends(require_insurance_agent)):
+    """Enforces company tenant isolation: strictly for licensed insurance agents (e.g. BCIC). Police admins denied."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    role = user_token.get("role")
-    if role not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
         
     target_company = user_token.get("company") or company
     try:
@@ -1202,10 +1237,7 @@ async def get_company_insurance_messages(company: Optional[str] = None, user_tok
             msg_comp = (m.get("company") or "").lower()
             msg_pol = (m.get("policy_number") or "").upper()
             
-            # Superadmin gets all if no company constraint
-            if not target_company and role == "admin":
-                messages.append(m)
-            elif target_company:
+            if target_company:
                 t_comp = target_company.lower()
                 matches_company = (t_comp in msg_comp or msg_comp in t_comp or 
                                   ("bcic" in t_comp and "bcse" in msg_comp) or 
@@ -1222,13 +1254,10 @@ async def get_company_insurance_messages(company: Optional[str] = None, user_tok
 
 
 @app.post("/api/insurance/reply")
-async def reply_insurance_message(payload: dict, user_token: dict = Depends(verify_auth)):
-    """Allows insurance agent to reply to civilian policy message thread"""
+async def reply_insurance_message(payload: dict, user_token: dict = Depends(require_insurance_agent)):
+    """Allows licensed insurance agent to reply to civilian policy message thread"""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    role = user_token.get("role")
-    if role not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
         
     policy_num = payload.get("policy_number", "").strip().upper()
     msg_text = payload.get("message", "").strip()
@@ -1252,11 +1281,9 @@ async def reply_insurance_message(payload: dict, user_token: dict = Depends(veri
 
 
 @app.post("/api/insurance/register_client")
-async def register_insurance_client(client: ClientRegister, user_token: dict = Depends(verify_auth)):
+async def register_insurance_client(client: ClientRegister, user_token: dict = Depends(require_insurance_agent)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    if user_token.get("role") != "insurance_agent":
-        raise HTTPException(status_code=403, detail="Policy issuance is restricted to authorized Insurance Company Agents. JA Police Administrators manage users and maintain oversight.")
         
     try:
         try:
@@ -1292,11 +1319,9 @@ async def register_insurance_client(client: ClientRegister, user_token: dict = D
 
 
 @app.post("/api/insurance/policy/status")
-async def update_insurance_status(payload: dict, user_token: dict = Depends(verify_auth)):
+async def update_insurance_status(payload: dict, user_token: dict = Depends(require_insurance_agent)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    if user_token.get("role") != "insurance_agent":
-        raise HTTPException(status_code=403, detail="Policy issuance is restricted to authorized Insurance Company Agents. JA Police Administrators manage users and maintain oversight.")
         
     try:
         policy_num = payload.get("policy_number")
@@ -1318,11 +1343,9 @@ async def update_insurance_status(payload: dict, user_token: dict = Depends(veri
 
 
 @app.post("/api/insurance/create_policy")
-async def create_insurance_policy_agent(payload: dict, user_token: dict = Depends(verify_auth)):
+async def create_insurance_policy_agent(payload: dict, user_token: dict = Depends(require_insurance_agent)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-    if user_token.get("role") != "insurance_agent":
-        raise HTTPException(status_code=403, detail="Policy issuance is restricted to authorized Insurance Company Agents. JA Police Administrators manage users and maintain oversight.")
         
     try:
         raw_email = payload.get("user_email", "")
@@ -1333,16 +1356,17 @@ async def create_insurance_policy_agent(payload: dict, user_token: dict = Depend
             
         user_email = raw_email.strip().lower()
         policy_num = raw_pol.strip().upper()
+        agent_company = user_token.get("company", "Unknown")
         
         policy_data = {
             "user_email": user_email,
             "policy_number": policy_num,
-            "company": payload.get("company", "Unknown"),
+            "company": agent_company,
             "payment_amount": float(payload.get("payment_amount", 0.0) or 0.0),
             "next_payment_date": payload.get("next_payment_date", ""),
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "stage": 1,
-            "assigned_by_admin": True
+            "assigned_by_agent": user_token.get("email")
         }
         
         # Link owner_uid if user account exists in Firebase Auth
@@ -1363,14 +1387,14 @@ async def create_insurance_policy_agent(payload: dict, user_token: dict = Depend
 
 
 @app.post("/api/insurance/add-agent")
-async def add_agency_agent(payload: dict, user_token: dict = Depends(verify_auth)):
-    """Allows an Insurance Agent to add new agents to their own company portal."""
+async def add_agency_agent(payload: dict, user_token: dict = Depends(require_insurance_agent)):
+    """Allows an Insurance Agent to add new agents to their own company portal with a temporary password."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
         
-    role = user_token.get("role")
-    if role not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    company = user_token.get("company")
+    if not company:
+        raise HTTPException(status_code=400, detail="Agent has no company assigned")
         
     email = (payload.get("email") or "").strip().lower()
     password = (payload.get("password") or "").strip()
@@ -1378,15 +1402,6 @@ async def add_agency_agent(payload: dict, user_token: dict = Depends(verify_auth
         raise HTTPException(status_code=400, detail="Agent email and temporary password required")
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-        
-    # Enforce company isolation:
-    if role == "insurance_agent":
-        company = user_token.get("company")
-        if not company:
-            raise HTTPException(status_code=400, detail="Agent has no company assigned")
-    else:
-        # Admin provisioning
-        company = payload.get("company", "BCIC")
         
     try:
         # Prevent cross-company duplicate email collision
@@ -1410,13 +1425,14 @@ async def add_agency_agent(payload: dict, user_token: dict = Depends(verify_auth
 
         # Create in Firebase Auth
         new_user = auth.create_user(email=email, password=password)
-        # Set claims
-        auth.set_custom_user_claims(new_user.uid, {"role": "insurance_agent", "company": company})
+        # Set claims with must_change_password: True
+        auth.set_custom_user_claims(new_user.uid, {"role": "insurance_agent", "company": company, "must_change_password": True})
         # Save in Firestore users collection
         db.collection("users").document(new_user.uid).set({
             "email": email,
             "role": "insurance_agent",
             "company": company,
+            "must_change_password": True,
             "created_by": user_token.get("uid"),
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
         })
@@ -1469,16 +1485,13 @@ async def submit_insurance_claim(payload: dict, user_token: dict = Depends(verif
 
 
 @app.get("/api/insurance/claims")
-async def get_insurance_claims(company: Optional[str] = None, user_token: dict = Depends(verify_auth)):
-    """Strict tenant isolation: agents only see claims for their assigned company (e.g. BCIC)"""
+async def get_insurance_claims(company: Optional[str] = None, user_token: dict = Depends(require_insurance_agent)):
+    """Strict tenant isolation: agents only see claims for their assigned company (e.g. BCIC). Police admins denied."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
-        role = user_token.get("role")
-        if role not in ["insurance_agent", "admin"]:
-            raise HTTPException(status_code=403, detail="Unauthorized")
-            
-        target_company = user_token.get("company") or company
+        agent_company = user_token.get("company")
+        target_company = agent_company or company
         
         docs = db.collection("insurance_policies").stream()
         claims = []
@@ -1487,9 +1500,7 @@ async def get_insurance_claims(company: Optional[str] = None, user_token: dict =
             if claim_data.get("stage", 1) < 1:
                 continue
                 
-            if not target_company and role == "admin":
-                claims.append(claim_data)
-            elif target_company:
+            if target_company:
                 c_comp = (claim_data.get("company") or "").lower()
                 t_comp = target_company.lower()
                 if (t_comp in c_comp or c_comp in t_comp or 
@@ -1498,6 +1509,8 @@ async def get_insurance_claims(company: Optional[str] = None, user_token: dict =
                     claims.append(claim_data)
                     
         return claims
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1543,13 +1556,10 @@ async def get_my_insurance_claims(user_token: dict = Depends(verify_auth)):
 
 
 @app.get("/api/insurance/incident/{incident_id}")
-async def get_incident_for_insurance(incident_id: str, user_token: dict = Depends(verify_auth)):
+async def get_incident_for_insurance(incident_id: str, user_token: dict = Depends(require_insurance_agent)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
     try:
-        role = user_token.get("role")
-        if role not in ["insurance_agent", "admin"]:
-            raise HTTPException(status_code=403, detail="Unauthorized")
         doc_ref = db.collection("incidents").document(incident_id)
         doc = doc_ref.get()
         if not doc.exists:
@@ -1636,18 +1646,12 @@ async def upload_payment_receipt(payload: dict, user_token: dict = Depends(verif
 
 
 @app.get("/api/insurance/receipts")
-async def get_insurance_receipts(user_token: dict = Depends(verify_auth)):
-    """Retrieves payment receipts for insurance agents (filtered by agency) or super admins."""
+async def get_insurance_receipts(user_token: dict = Depends(require_insurance_agent)):
+    """Retrieves payment receipts strictly for authorized insurance agents (filtered by agency)."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
         
-    role = user_token.get("role")
-    if role not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-        
     agent_company = user_token.get("company", "")
-    is_super_admin = (role == "admin") or (user_token.get("email") in ["admin@ja-accident-report.com", "shevaughn@example.com"])
-    
     receipts_ref = db.collection("insurance_receipts")
     receipts = []
     
@@ -1656,14 +1660,11 @@ async def get_insurance_receipts(user_token: dict = Depends(verify_auth)):
         for doc in docs:
             data = doc.to_dict() or {}
             data["receipt_id"] = doc.id
-            if is_super_admin:
+            comp = (data.get("company") or "").lower()
+            u_comp = (agent_company or "").lower()
+            if not u_comp or u_comp in comp or comp in u_comp or ("bcic" in u_comp and "bcse" in comp) or ("bcse" in u_comp and "bcic" in comp):
                 receipts.append(data)
-            else:
-                comp = (data.get("company") or "").lower()
-                u_comp = (agent_company or "").lower()
-                if not u_comp or u_comp in comp or comp in u_comp or ("bcic" in u_comp and "bcse" in comp) or ("bcse" in u_comp and "bcic" in comp):
-                    receipts.append(data)
-                    
+                
         receipts.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         return {"receipts": receipts}
     except Exception as e:
@@ -1671,14 +1672,10 @@ async def get_insurance_receipts(user_token: dict = Depends(verify_auth)):
 
 
 @app.post("/api/insurance/approve-receipt")
-async def approve_payment_receipt(payload: dict, user_token: dict = Depends(verify_auth)):
+async def approve_payment_receipt(payload: dict, user_token: dict = Depends(require_insurance_agent)):
     """Allows an Insurance Agent to approve a civilian bank transfer receipt."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-        
-    role = user_token.get("role")
-    if role not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
         
     receipt_id = (payload.get("receipt_id") or "").strip()
     if not receipt_id:
@@ -1744,13 +1741,9 @@ async def approve_payment_receipt(payload: dict, user_token: dict = Depends(veri
 
 
 @app.post("/api/insurance/reject-receipt")
-async def reject_payment_receipt(payload: dict, user_token: dict = Depends(verify_auth)):
+async def reject_payment_receipt(payload: dict, user_token: dict = Depends(require_insurance_agent)):
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-        
-    role = user_token.get("role")
-    if role not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
         
     receipt_id = (payload.get("receipt_id") or "").strip()
     reason = (payload.get("reason") or "Invalid or unverified transaction receipt").strip()
@@ -1782,14 +1775,10 @@ async def reject_payment_receipt(payload: dict, user_token: dict = Depends(verif
 
 
 @app.post("/api/insurance/adjust-payment")
-async def adjust_policy_payment(payload: dict, user_token: dict = Depends(verify_auth)):
-    """Allows an Insurance Agent or Admin to graphically adjust policy premium or due date."""
+async def adjust_policy_payment(payload: dict, user_token: dict = Depends(require_insurance_agent)):
+    """Allows an Insurance Agent to graphically adjust policy premium or due date."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
-        
-    role = user_token.get("role")
-    if role not in ["insurance_agent", "admin"]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
         
     policy_num = (payload.get("policy_number") or "").strip().upper()
     if not policy_num:
@@ -1826,9 +1815,11 @@ async def adjust_policy_payment(payload: dict, user_token: dict = Depends(verify
 
 @app.get("/api/insurance/payment-history/{policy_number}")
 async def get_payment_history(policy_number: str, user_token: dict = Depends(verify_auth)):
-    """Fetches verified payment history for a policy."""
+    """Fetches verified payment history for a policy. Police admins denied."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not configured")
+    if user_token.get("role") == "admin":
+        raise HTTPException(status_code=403, detail="Police administrators do not have access to client insurance payment histories.")
         
     pol_num = policy_number.strip().upper()
     pol_ref = db.collection("insurance_policies").document(pol_num)
